@@ -1,5 +1,5 @@
 import "server-only";
-import { createHash, createHmac, hkdfSync } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { and, asc, count, desc, eq, gt, isNull, lte, sql } from "drizzle-orm";
 import { assertCan } from "@/lib/access";
 import { type Actor, toRole } from "@/lib/auth/rbac";
@@ -11,6 +11,7 @@ import { lockOwnEvent } from "@/lib/events";
 import { log } from "@/lib/log";
 import { withOp } from "@/lib/op-ledger";
 import { idText } from "@/lib/text";
+import { deriveKey } from "@/lib/tickets/keys";
 import { writeTx } from "@/lib/write-tx";
 
 /**
@@ -31,11 +32,9 @@ const E = schema.event;
 
 const digest = (token: string) => createHash("sha256").update(token).digest();
 
-let inviteKey: Buffer | undefined;
-/** The token for (event, op id): 16 bytes of HMAC-SHA256, base64url (22 characters). */
+/** The token for (event, op id): 16 bytes of HMAC-SHA256, base64url (22 characters). Key: `src/lib/tickets/keys.ts`. */
 function inviteToken(eventId: string, clientOpId: string): string {
-  inviteKey ??= Buffer.from(hkdfSync("sha256", env().BETTER_AUTH_SECRET, "breakthru:15-event-ticketing", "staff-invite:v1", 32));
-  return createHmac("sha256", inviteKey).update(`${eventId}:${clientOpId}`).digest().subarray(0, 16).toString("base64url");
+  return createHmac("sha256", deriveKey("staff-invite:v1")).update(`${eventId}:${clientOpId}`).digest().subarray(0, 16).toString("base64url");
 }
 
 const linkFor = (token: string) => `${env().APP_URL.replace(/\/$/, "")}/staff-invite#t=${token}`;
@@ -150,7 +149,7 @@ export async function removeStaff(actor: Actor | null, rawEventId: string, rawUs
  * the event row is locked first (as every organiser write does), then
  * `update staff_invite set used_by, used_at where id = $i and used_at is null and expires_at > now()`; zero rows is the
  * same 404 for an unknown, used or expired token. The organiser of the event can't accept their own invite (same 404,
- * the invite stays unused), and neither can anyone for a cancelled event. At most 20 staff per event (409 `staff_full`,
+ * the invite stays unused), and neither can anyone for a cancelled or hidden event. Someone who is already staff gets 200 `replayed: true` and the invite stays open. At most 20 staff per event (409 `staff_full`,
  * and the invite stays unused). A retry by the user who already used this very token, while they are still staff,
  * answers 200 with `replayed: true`, so a lost response doesn't strand them.
  */
@@ -162,8 +161,11 @@ export async function acceptInvite(actor: Actor | null, input: unknown) {
     const [peek] = await tx.select({ id: I.id, eventId: I.eventId }).from(I).where(eq(I.tokenDigest, d));
     if (!peek) throw noInvite();
     // Event row first: the same order organiser writes use, so an accept can't deadlock a revoke or an invite.
-    const [ev] = await tx.select({ id: E.id, title: E.title, organizerId: E.organizerId, status: E.status }).from(E).where(eq(E.id, peek.eventId)).for("update");
-    if (!ev || ev.organizerId === actor.id || ev.status === "cancelled") throw noInvite();
+    const [ev] = await tx.select({ id: E.id, title: E.title, organizerId: E.organizerId, status: E.status, hiddenAt: E.hiddenAt }).from(E).where(eq(E.id, peek.eventId)).for("update");
+    if (!ev || ev.organizerId === actor.id || ev.status === "cancelled" || ev.hiddenAt) throw noInvite();
+    // Already door staff here: answer ok and leave the invite open for someone else (no cap check, nothing burned).
+    const [already] = await tx.select({ userId: S.userId }).from(S).where(and(eq(S.eventId, ev.id), eq(S.userId, actor.id)));
+    if (already) return { eventId: ev.id, title: ev.title, replayed: true };
     const [used] = await tx
       .update(I)
       .set({ usedBy: actor.id, usedAt: new Date() })

@@ -107,6 +107,7 @@ export function checkTimes(t: Times): void {
   if (span > LIMITS.maxDurationDays * DAY) throw new BadRequestError(`An event can last at most ${LIMITS.maxDurationDays} days.`);
   if (t.doorsAt && t.doorsAt.getTime() > t.startsAt.getTime()) throw new BadRequestError("Doors must open at or before the start.");
   if (t.registrationClosesAt.getTime() > t.endsAt.getTime()) throw new BadRequestError("Registration must close before the event ends.");
+  if (t.checkinOpensAt.getTime() < t.startsAt.getTime() - DAY) throw new BadRequestError("Check-in can open at most 24 hours before the start.");
   if (t.checkinOpensAt.getTime() > t.endsAt.getTime()) throw new BadRequestError("Check-in must open before the event ends.");
 }
 

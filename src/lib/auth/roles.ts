@@ -1,5 +1,5 @@
 import "server-only";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { assertCan } from "@/lib/access";
 import { type Actor, type Role, toRole } from "@/lib/auth/rbac";
 import { schema } from "@/lib/db";
@@ -32,7 +32,7 @@ export type RoleChange = {
  *    first result with `replayed: true` and changes nothing, even after the role moved since; the same id with a
  *    different request is 409 `op_id_reused`. The ledger row and the result commit with the change, so a parallel duplicate waits for the first.
  *
- * Revoking `organizer` hides that organiser's `published` events that aren't already hidden
+ * Revoking `organizer` hides that organiser's `published` and `cancelled` events (both are public by slug) that aren't already hidden
  * (`hidden_reason = 'organizer_revoked'`), so an admin's own hide and its reason are never overwritten. Granting
  * `organizer` again unhides only the events stamped `organizer_revoked`. The role write and the hide/unhide share one
  * transaction. Lock order (see `lockActor`): the admin's row FOR SHARE, the admin's write allowance, the target's row
@@ -66,7 +66,7 @@ export async function setUserRole(actor: Actor | null, input: unknown): Promise<
         const rows = await tx
           .update(E)
           .set({ hiddenAt: new Date(), hiddenReason: ORGANIZER_REVOKED })
-          .where(and(eq(E.organizerId, target.id), eq(E.status, "published"), isNull(E.hiddenAt)))
+          .where(and(eq(E.organizerId, target.id), inArray(E.status, ["published", "cancelled"]), isNull(E.hiddenAt)))
           .returning({ id: E.id });
         result.hidden = rows.length;
       } else {

@@ -53,7 +53,7 @@ export async function adminStats(actor: Actor | null) {
 }
 
 /**
- * Hide a published event with a reason (it leaves the list and its page 404s; check-in closes), or unhide it.
+ * Hide a published or cancelled event (cancelled pages stay public by slug) with a reason (it leaves the list and its page 404s; check-in closes), or unhide it.
  * Hiding over an `organizer_revoked` hide replaces that reason with the admin's, so a later re-grant of `organizer`
  * does not unhide it; hiding an already admin-hidden event changes nothing. An event hidden because its organiser was
  * revoked can't be unhidden here: grant the role again. Unhiding is refused while the owner isn't an organiser.
@@ -82,7 +82,7 @@ export async function hideEvent(actor: Actor | null, rawId: string, input: unkno
       .for("update");
     if (!row) throw new NotFoundError();
     if (hidden) {
-      if (row.status !== "published") throw new ConflictError("Only a published event can be hidden.");
+      if (row.status === "draft") throw new ConflictError("Only a published or cancelled event can be hidden.");
       if (row.hiddenAt && row.hiddenReason !== ORGANIZER_REVOKED) return { id, hidden: true, changed: false };
       await tx.update(E).set({ hiddenAt: row.hiddenAt ?? new Date(), hiddenReason: reason }).where(eq(E.id, id));
       return { id, hidden: true, changed: true };

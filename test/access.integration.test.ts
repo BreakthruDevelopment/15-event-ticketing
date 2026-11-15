@@ -221,6 +221,56 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
     });
   });
 
+  describe("cancelled events (public by slug) can be hidden", () => {
+    it("an admin hide of a cancelled event makes its slug 404; unhide restores it", async () => {
+      const e = await publish(orgA, eventInput({ title: "Cancelled then hidden" }));
+      const c = await EV.updateEvent(orgA, e.id, { version: e.version, status: "cancelled" });
+      await expect(EV.getPublicEventBySlug(e.slug)).resolves.toBeTruthy();
+      await expect(AD.hideEvent(admin, e.id, { hidden: true, reason: "spam", clientOpId: crypto.randomUUID() })).resolves.toMatchObject({ changed: true });
+      await expect(EV.getPublicEventBySlug(e.slug)).rejects.toMatchObject({ status: 404 });
+      await expect(AD.hideEvent(admin, e.id, { hidden: false, clientOpId: crypto.randomUUID() })).resolves.toMatchObject({ changed: true });
+      await expect(EV.getPublicEventBySlug(e.slug)).resolves.toBeTruthy();
+      expect(c.status).toBe("cancelled");
+    });
+
+    it("revoking organizer hides a cancelled event too; re-granting unhides it", async () => {
+      const o = await makeUser(sql, P, "revcancel", "organizer");
+      const e = await publish(o, eventInput({ title: "Revoked cancelled" }));
+      await EV.updateEvent(o, e.id, { version: e.version, status: "cancelled" });
+      const rev = await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer", clientOpId: crypto.randomUUID() });
+      expect(rev).toMatchObject({ changed: true, hidden: 1 });
+      await expect(EV.getPublicEventBySlug(e.slug)).rejects.toMatchObject({ status: 404 });
+      const grant = await R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() });
+      expect(grant).toMatchObject({ unhidden: 1 });
+      await expect(EV.getPublicEventBySlug(e.slug)).resolves.toBeTruthy();
+    });
+  });
+
+  describe("accept invite: hidden events and existing staff", () => {
+    const tokenOf = (link: string) => new URL(link).hash.slice("#t=".length);
+
+    it("refuses a hidden event (404) and leaves the invite unused", async () => {
+      const u = await makeUser(sql, P, "hidacc", "user");
+      const e = await publish(orgA, eventInput({ title: "Hidden accept" }));
+      const inv = await ST.createInvite(orgA, e.id, op());
+      await AD.hideEvent(admin, e.id, { hidden: true, reason: "spam", clientOpId: crypto.randomUUID() });
+      await expect(ST.acceptInvite(u, { token: tokenOf(inv.link) })).rejects.toMatchObject({ status: 404 });
+      const [row] = await sql`select used_at from staff_invite where id = ${inv.id}`;
+      expect(row.used_at).toBeNull();
+    });
+
+    it("an existing staffer accepting another invite burns nothing and ignores the cap", async () => {
+      const u = await makeUser(sql, P, "dupstaff", "user");
+      const e = await publish(orgA, eventInput({ title: "Dup staff" }));
+      const first = await ST.createInvite(orgA, e.id, op());
+      await ST.acceptInvite(u, { token: tokenOf(first.link) });
+      const second = await ST.createInvite(orgA, e.id, op());
+      await expect(ST.acceptInvite(u, { token: tokenOf(second.link) })).resolves.toMatchObject({ replayed: true });
+      const [row] = await sql`select used_at from staff_invite where id = ${second.id}`;
+      expect(row.used_at).toBeNull();
+    });
+  });
+
   describe("door staff (per event, not a role)", () => {
     it("staff of event A can use A's door and nothing of event B's; a stranger gets 404 on both", async () => {
       const inv = await ST.createInvite(orgA, live.id, op());

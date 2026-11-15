@@ -195,12 +195,15 @@ describe.skipIf(!url)("events (Postgres)", () => {
 
     it("merged times are re-checked: moving the start past a stored closing time is a 400", async () => {
       const e = await mk();
-      const later = new Date(e.endsAt.getTime() + 24 * 3_600_000).toISOString();
-      const err = await EV.updateEvent(org, e.id, { version: 1, startsAt: later, endsAt: new Date(e.endsAt.getTime() + 25 * 3_600_000).toISOString() }).catch((x) => x);
+      const later = new Date(e.endsAt.getTime() + 12 * 3_600_000).toISOString();
+      const err = await EV.updateEvent(org, e.id, { version: 1, startsAt: later, endsAt: new Date(e.endsAt.getTime() + 13 * 3_600_000).toISOString() }).catch((x) => x);
       // registration_closes_at stayed at the old start, which is fine (before the end), so this one succeeds...
       expect(err.version).toBe(2);
       // ...but an end before the stored check-in opening is refused.
       const bad = await EV.updateEvent(org, e.id, { version: 2, endsAt: new Date(e.startsAt.getTime() + 1000).toISOString() }).catch((x) => x);
+      // Moving the start so far that the stored check-in opening is over 24 h earlier is a 400 too.
+      const far = await EV.updateEvent(org, e.id, { version: 2, startsAt: new Date(e.startsAt.getTime() + 48 * 3_600_000).toISOString(), endsAt: new Date(e.startsAt.getTime() + 49 * 3_600_000).toISOString() }).catch((x) => x);
+      expect(far.status).toBe(400);
       expect(bad.status === 400 || bad.name === "ZodError").toBe(true);
     });
 
@@ -306,6 +309,14 @@ describe.skipIf(!url)("events (Postgres)", () => {
       expect(await patch({ title: "New title", venueName: "Another venue" }), "no-op").toBe(0);
       // Publishing alone doesn't change what the FAQ says either.
       expect(await patch({ status: "published" }), "publish").toBe(0);
+    });
+
+    it("refuses a check-in opening more than 24 hours before the start (400), on create and on update", async () => {
+      const e = (await EV.createEvent(org, eventInput({ title: "Early checkin" }))).event;
+      const early = new Date(e.startsAt.getTime() - 25 * 3_600_000).toISOString();
+      const ok = new Date(e.startsAt.getTime() - 23 * 3_600_000).toISOString();
+      await expect(EV.updateEvent(org, e.id, { version: e.version, checkinOpensAt: early })).rejects.toMatchObject({ status: 400 });
+      await expect(EV.updateEvent(org, e.id, { version: e.version, checkinOpensAt: ok })).resolves.toBeTruthy();
     });
 
     it("bumps when a ticket type is added, renamed or deleted, and not when only capacity or position change", async () => {

@@ -69,6 +69,7 @@ describe("event schemas", () => {
     expect(() => checkTimes(t({ doorsAt: new Date("2026-12-01T19:30:00-06:00") }))).toThrow(/Doors/);
     expect(() => checkTimes(t({ registrationClosesAt: new Date("2026-12-02T00:00:00-06:00") }))).toThrow(/Registration/);
     expect(() => checkTimes(t({ checkinOpensAt: new Date("2026-12-02T00:00:00-06:00") }))).toThrow(/Check-in/);
+    expect(() => checkTimes(t({ checkinOpensAt: new Date("2026-11-30T17:59:00-06:00") }))).toThrow(/24 hours/);
   });
 
   it("slugStem makes a valid stem", () => {
