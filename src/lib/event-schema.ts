@@ -131,6 +131,8 @@ export const newTicketTypeInput = z.strictObject({
   name: text(60, { min: 1, minMessage: "Name is required" }),
   capacity: z.number().int().min(1).max(LIMITS.capacityPerType),
   position: z.number().int().min(0).max(99).optional(),
+  /** One id per click (`opFor`), required: name uniqueness can't detect a retry once the first type was renamed. */
+  clientOpId,
 });
 export type NewTicketTypeInput = z.input<typeof newTicketTypeInput>;
 

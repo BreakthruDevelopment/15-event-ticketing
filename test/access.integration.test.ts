@@ -36,7 +36,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
 
   const publish = async (who: TestActor, o: Record<string, unknown>) => {
     const e = (await EV.createEvent(who, o)).event;
-    const { ticketType } = await TT.createTicketType(who, e.id, { name: "General", capacity: 10 });
+    const { ticketType } = await TT.createTicketType(who, e.id, { name: "General", capacity: 10, clientOpId: crypto.randomUUID() });
     const pub = await EV.updateEvent(who, e.id, { version: 1, status: "published" });
     return { id: e.id, slug: e.slug, typeId: ticketType.id, version: pub.version };
   };
@@ -60,7 +60,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
     AC = await import("@/lib/access");
     D = (await import("@/lib/db")).db();
     draft = (await EV.createEvent(orgA, eventInput({ title: "Draft of A" }))).event;
-    await TT.createTicketType(orgA, draft.id, { name: "General", capacity: 5 });
+    await TT.createTicketType(orgA, draft.id, { name: "General", capacity: 5, clientOpId: crypto.randomUUID() });
     const l = await publish(orgA, openDoorInput({ title: "Live of A" }));
     live = l;
     liveType = l.typeId;
@@ -108,7 +108,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
         () => EV.createEvent(attendee, eventInput()),
         () => EV.updateEvent(attendee, live.id, { version: 1, title: "x" }),
         () => EV.deleteEvent(attendee, draft.id),
-        () => TT.createTicketType(attendee, live.id, { name: "VIP", capacity: 1 }),
+        () => TT.createTicketType(attendee, live.id, { name: "VIP", capacity: 1, clientOpId: crypto.randomUUID() }),
         () => TT.updateTicketType(attendee, live.id, liveType, { version: 1, name: "x" }),
         () => TT.deleteTicketType(attendee, live.id, liveType),
         () => ST.listStaff(attendee, live.id),
@@ -144,7 +144,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
           () => EV.getMyEvent(orgA, id),
           () => EV.updateEvent(orgA, id, { version: 1, title: "hijack" }),
           () => EV.deleteEvent(orgA, id),
-          () => TT.createTicketType(orgA, id, { name: "VIP", capacity: 1 }),
+          () => TT.createTicketType(orgA, id, { name: "VIP", capacity: 1, clientOpId: crypto.randomUUID() }),
           () => TT.updateTicketType(orgA, id, liveType, { version: 1, name: "x" }),
           () => TT.deleteTicketType(orgA, id, liveType),
           () => ST.listStaff(orgA, id),
@@ -195,7 +195,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
         () => EV.createEvent(admin, eventInput()),
         () => EV.updateEvent(admin, live.id, { version: 1, title: "x" }),
         () => EV.deleteEvent(admin, draft.id),
-        () => TT.createTicketType(admin, live.id, { name: "VIP", capacity: 1 }),
+        () => TT.createTicketType(admin, live.id, { name: "VIP", capacity: 1, clientOpId: crypto.randomUUID() }),
         () => TT.deleteTicketType(admin, live.id, liveType),
         () => ST.listStaff(admin, live.id),
         () => ST.createInvite(admin, live.id, op()),
@@ -441,7 +441,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
         () => EV.createEvent(o, eventInput()),
         () => EV.updateEvent(o, e.id, { version: e.version, venueName: "x" }),
         () => EV.deleteEvent(o, e.id),
-        () => TT.createTicketType(o, e.id, { name: "VIP", capacity: 1 }),
+        () => TT.createTicketType(o, e.id, { name: "VIP", capacity: 1, clientOpId: crypto.randomUUID() }),
         () => TT.updateTicketType(o, e.id, e.typeId, { version: 1, name: "x" }),
         () => TT.deleteTicketType(o, e.id, e.typeId),
         () => ST.createInvite(o, e.id, op()),

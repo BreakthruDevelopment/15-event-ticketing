@@ -6,6 +6,7 @@ import { schema } from "@/lib/db";
 import { CodedConflictError, NotFoundError, VersionConflictError } from "@/lib/errors";
 import { LIMITS, idParam, newTicketTypeInput, updateTicketTypeInput } from "@/lib/event-schema";
 import { lockOwnEvent } from "@/lib/events";
+import { withOp } from "@/lib/op-ledger";
 import { type Tx } from "@/lib/usage";
 import { writeTx } from "@/lib/write-tx";
 
@@ -47,29 +48,36 @@ const notCancelled = (status: string) => {
   if (status === "cancelled") throw new CodedConflictError("event_cancelled", "A cancelled event can't be changed.");
 };
 
-/** Add a ticket type: at most 5 per event, capacity at most 5,000 per type and 10,000 per event, names unique per event. */
+/**
+ * Add a ticket type: at most 5 per event, capacity at most 5,000 per type and 10,000 per event, names unique per event.
+ * Body `{ name, capacity, position?, clientOpId }`, the op id required (`op_ledger`): a retry returns the first result
+ * (`replayed: true`) and adds nothing, even if the first type was renamed or resized in between (the name constraint
+ * alone can't tell a retry from a new type then).
+ */
 export async function createTicketType(actor: Actor | null, rawEventId: string, input: unknown) {
   assertCan(actor, "event:manage");
   const data = newTicketTypeInput.parse(input);
-  const row = await writeTx(actor, "event:manage", async (tx) => {
+  const out = await writeTx(actor, "event:manage", async (tx) => {
     const ev = await lockOwnEvent(tx, actor, rawEventId);
-    notCancelled(ev.status);
-    const [{ n }] = await tx.select({ n: count() }).from(T).where(eq(T.eventId, ev.id));
-    if (n >= LIMITS.typesPerEvent) throw new CodedConflictError("type_limit", `An event can have at most ${LIMITS.typesPerEvent} ticket types.`);
-    if ((await otherCapacity(tx, ev.id)) + data.capacity > LIMITS.capacityPerEvent) {
-      throw new CodedConflictError("capacity_limit", `An event can hold at most ${LIMITS.capacityPerEvent} tickets in total.`);
-    }
-    // The event row lock serialises every ticket type write of this event, so this check can't race another create.
-    const [created] = await tx
-      .insert(T)
-      .values({ eventId: ev.id, name: data.name, capacity: data.capacity, position: data.position ?? n })
-      .onConflictDoNothing({ target: [T.eventId, T.name] })
-      .returning();
-    if (!created) throw new CodedConflictError("name_taken", "This event already has a ticket type with that name.");
-    await bumpFaq(tx, ev.id);
-    return created;
+    return withOp(tx, actor.id, { kind: "ticket-type", clientOpId: data.clientOpId, payload: `${ev.id}\n${data.name}\n${data.capacity}\n${data.position ?? ""}` }, async () => {
+      notCancelled(ev.status);
+      const [{ n }] = await tx.select({ n: count() }).from(T).where(eq(T.eventId, ev.id));
+      if (n >= LIMITS.typesPerEvent) throw new CodedConflictError("type_limit", `An event can have at most ${LIMITS.typesPerEvent} ticket types.`);
+      if ((await otherCapacity(tx, ev.id)) + data.capacity > LIMITS.capacityPerEvent) {
+        throw new CodedConflictError("capacity_limit", `An event can hold at most ${LIMITS.capacityPerEvent} tickets in total.`);
+      }
+      // The event row lock serialises every ticket type write of this event, so this check can't race another create.
+      const [created] = await tx
+        .insert(T)
+        .values({ eventId: ev.id, name: data.name, capacity: data.capacity, position: data.position ?? n })
+        .onConflictDoNothing({ target: [T.eventId, T.name] })
+        .returning();
+      if (!created) throw new CodedConflictError("name_taken", "This event already has a ticket type with that name.");
+      await bumpFaq(tx, ev.id);
+      return { ticketType: serialize(created) };
+    });
   });
-  return { ticketType: serialize(row) };
+  return { ...out.result, replayed: out.replayed };
 }
 
 /** Rename, resize or move a ticket type. A stale `version` is 409; capacity below `issued` is 409 `capacity_below_issued`. */

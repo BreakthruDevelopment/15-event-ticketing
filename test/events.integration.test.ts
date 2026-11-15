@@ -27,7 +27,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
   const mk = async (o: Record<string, unknown> = {}, who = org) => (await EV.createEvent(who, eventInput(o))).event;
   const withType = async (o: Record<string, unknown> = {}, cap = 10, who = org) => {
     const e = await mk(o, who);
-    const { ticketType } = await TT.createTicketType(who, e.id, { name: "General", capacity: cap });
+    const { ticketType } = await TT.createTicketType(who, e.id, { name: "General", capacity: cap, clientOpId: crypto.randomUUID() });
     return { event: e, type: ticketType };
   };
   const faqVersion = async (id: string) => (await sql`select faq_version from event where id = ${id}`)[0].faq_version as number;
@@ -164,7 +164,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
       const e = await mk();
       await expect(EV.updateEvent(org, e.id, { version: 1, status: "published" })).rejects.toMatchObject({ status: 409, code: "no_ticket_types" });
       expect((await fresh(e.id)).status).toBe("draft");
-      await TT.createTicketType(org, e.id, { name: "General", capacity: 5 });
+      await TT.createTicketType(org, e.id, { name: "General", capacity: 5, clientOpId: crypto.randomUUID() });
       const pub = await EV.updateEvent(org, e.id, { version: 1, status: "published" });
       expect(pub.status).toBe("published");
       const same = await EV.updateEvent(org, e.id, { version: pub.version, status: "published", venueName: "Same status, new venue" });
@@ -179,7 +179,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
       expect(cancelled.status).toBe("cancelled");
       await expect(EV.updateEvent(org, e.id, { version: cancelled.version, title: "Edit" })).rejects.toMatchObject({ status: 409, code: "event_cancelled" });
       await expect(EV.updateEvent(org, e.id, { version: cancelled.version, status: "published" })).rejects.toMatchObject({ status: 409 });
-      await expect(TT.createTicketType(org, e.id, { name: "VIP", capacity: 1 })).rejects.toMatchObject({ status: 409, code: "event_cancelled" });
+      await expect(TT.createTicketType(org, e.id, { name: "VIP", capacity: 1, clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 409, code: "event_cancelled" });
     });
 
     it("the slug can change in draft only, and not to a taken one", async () => {
@@ -188,7 +188,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
       await expect(EV.updateEvent(org, a.id, { version: 1, slug: b.slug })).rejects.toMatchObject({ status: 409, code: "slug_taken" });
       const moved = await EV.updateEvent(org, a.id, { version: 1, slug: `${P}-moved-slug` });
       expect(moved.slug).toBe(`${P}-moved-slug`);
-      await TT.createTicketType(org, a.id, { name: "General", capacity: 5 });
+      await TT.createTicketType(org, a.id, { name: "General", capacity: 5, clientOpId: crypto.randomUUID() });
       const pub = await EV.updateEvent(org, a.id, { version: moved.version, status: "published" });
       await expect(EV.updateEvent(org, a.id, { version: pub.version, slug: `${P}-after-publish` })).rejects.toMatchObject({ status: 409, code: "slug_locked" });
     });
@@ -224,7 +224,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
       const calls: [string, (bad: string) => Promise<unknown>][] = [
         ["getMyEvent", (b) => EV.getMyEvent(org, b)],
         ["deleteEvent", (b) => EV.deleteEvent(org, b)],
-        ["createTicketType event", (b) => TT.createTicketType(org, b, { name: "x", capacity: 1 })],
+        ["createTicketType event", (b) => TT.createTicketType(org, b, { name: "x", capacity: 1, clientOpId: crypto.randomUUID() })],
         ["updateTicketType event", (b) => TT.updateTicketType(org, b, ghost(), { version: 1, name: "x" })],
         ["updateTicketType type", (b) => TT.updateTicketType(org, e.id, b, { version: 1, name: "x" })],
         ["deleteTicketType event", (b) => TT.deleteTicketType(org, b, ghost())],
@@ -248,7 +248,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
         () => EV.getMyEvent(org, ghost()),
         () => EV.updateEvent(org, ghost(), { version: 1, title: "x" }),
         () => EV.deleteEvent(org, ghost()),
-        () => TT.createTicketType(org, ghost(), { name: "x", capacity: 1 }),
+        () => TT.createTicketType(org, ghost(), { name: "x", capacity: 1, clientOpId: crypto.randomUUID() }),
         () => TT.updateTicketType(org, e.id, ghost(), { version: 1, name: "y" }),
         () => TT.deleteTicketType(org, e.id, ghost()),
         () => ST.listStaff(org, ghost()),
@@ -311,7 +311,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
     it("bumps when a ticket type is added, renamed or deleted, and not when only capacity or position change", async () => {
       const { event: e, type } = await withType();
       const before = await faqVersion(e.id);
-      const { ticketType: vip } = await TT.createTicketType(org, e.id, { name: "VIP", capacity: 5 });
+      const { ticketType: vip } = await TT.createTicketType(org, e.id, { name: "VIP", capacity: 5, clientOpId: crypto.randomUUID() });
       expect(await faqVersion(e.id)).toBe(before + 1);
       const resized = await TT.updateTicketType(org, e.id, vip.id, { version: vip.version, capacity: 8, position: 3 });
       expect(await faqVersion(e.id)).toBe(before + 1);
@@ -327,26 +327,44 @@ describe.skipIf(!url)("events (Postgres)", () => {
   describe("ticket types", () => {
     it("enforces 5 types, 5,000 per type, 10,000 per event, unique names and the no-op / stale rules", async () => {
       const e = await mk();
-      await expect(TT.createTicketType(org, e.id, { name: "Big", capacity: 5001 })).rejects.toMatchObject({ name: "ZodError" });
-      await expect(TT.createTicketType(org, e.id, { name: "Zero", capacity: 0 })).rejects.toMatchObject({ name: "ZodError" });
-      await expect(TT.createTicketType(org, e.id, { name: "N\0", capacity: 1 })).rejects.toMatchObject({ name: "ZodError" });
-      const a = (await TT.createTicketType(org, e.id, { name: "A", capacity: 5000 })).ticketType;
-      await TT.createTicketType(org, e.id, { name: "B", capacity: 4000 });
-      await expect(TT.createTicketType(org, e.id, { name: "A", capacity: 1 })).rejects.toMatchObject({ status: 409, code: "name_taken" });
-      await expect(TT.createTicketType(org, e.id, { name: "C", capacity: 1001 })).rejects.toMatchObject({ status: 409, code: "capacity_limit" });
+      await expect(TT.createTicketType(org, e.id, { name: "Big", capacity: 5001, clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ name: "ZodError" });
+      await expect(TT.createTicketType(org, e.id, { name: "Zero", capacity: 0, clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ name: "ZodError" });
+      await expect(TT.createTicketType(org, e.id, { name: "N\0", capacity: 1, clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ name: "ZodError" });
+      const a = (await TT.createTicketType(org, e.id, { name: "A", capacity: 5000, clientOpId: crypto.randomUUID() })).ticketType;
+      await TT.createTicketType(org, e.id, { name: "B", capacity: 4000, clientOpId: crypto.randomUUID() });
+      await expect(TT.createTicketType(org, e.id, { name: "A", capacity: 1, clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 409, code: "name_taken" });
+      await expect(TT.createTicketType(org, e.id, { name: "C", capacity: 1001, clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 409, code: "capacity_limit" });
       await expect(TT.updateTicketType(org, e.id, a.id, { version: 1, name: "B" })).rejects.toMatchObject({ status: 409, code: "name_taken" });
       await expect(TT.updateTicketType(org, e.id, a.id, { version: 1, capacity: 5000, position: 1 })).resolves.toBeTruthy();
       const stale = await TT.updateTicketType(org, e.id, a.id, { version: 99, name: "Z" }).catch((x) => x);
       expect(stale).toMatchObject({ status: 409 });
       expect(stale.current.ticketType).toMatchObject({ id: a.id, version: 2 });
       await TT.updateTicketType(org, e.id, a.id, { version: 2, capacity: 100 });
-      for (const n of ["C", "D", "E"]) await TT.createTicketType(org, e.id, { name: n, capacity: 10 });
-      await expect(TT.createTicketType(org, e.id, { name: "F", capacity: 1 })).rejects.toMatchObject({ status: 409, code: "type_limit" });
+      for (const n of ["C", "D", "E"]) await TT.createTicketType(org, e.id, { name: n, capacity: 10, clientOpId: crypto.randomUUID() });
+      await expect(TT.createTicketType(org, e.id, { name: "F", capacity: 1, clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 409, code: "type_limit" });
+    });
+
+    it("a retry returns the first result and adds nothing, even after the first type was renamed; parallel duplicates make one; the op id can't be reused for another type", async () => {
+      const e = await mk();
+      const body = { name: "General", capacity: 10, clientOpId: crypto.randomUUID() };
+      const first = await TT.createTicketType(org, e.id, body);
+      expect(first.replayed).toBe(false);
+      await TT.updateTicketType(org, e.id, first.ticketType.id, { version: 1, name: "Renamed" });
+      const late = await TT.createTicketType(org, e.id, body);
+      expect(late).toMatchObject({ replayed: true, ticketType: { id: first.ticketType.id, name: "General" } });
+      expect((await fresh(e.id)).ticketTypes.map((t) => t.name)).toEqual(["Renamed"]);
+      await expect(TT.createTicketType(org, e.id, { ...body, capacity: 11 })).rejects.toMatchObject({ status: 409, code: "op_id_reused" });
+      const par = { name: "Parallel", capacity: 3, clientOpId: crypto.randomUUID() };
+      const results = await Promise.all(Array.from({ length: 5 }, () => TT.createTicketType(org, e.id, par)));
+      expect(results.filter((r) => !r.replayed)).toHaveLength(1);
+      expect(new Set(results.map((r) => r.ticketType.id)).size).toBe(1);
+      expect((await fresh(e.id)).ticketTypes).toHaveLength(2);
+      await expect(TT.createTicketType(org, e.id, { name: "No op id", capacity: 1 })).rejects.toMatchObject({ name: "ZodError" });
     });
 
     it("keeps the 5-type cap exact when created in parallel", async () => {
       const e = await mk();
-      const r = await Promise.allSettled(Array.from({ length: 9 }, (_, i) => TT.createTicketType(org, e.id, { name: `T${i}`, capacity: 10 })));
+      const r = await Promise.allSettled(Array.from({ length: 9 }, (_, i) => TT.createTicketType(org, e.id, { name: `T${i}`, capacity: 10, clientOpId: crypto.randomUUID() })));
       expect(r.filter((x) => x.status === "fulfilled")).toHaveLength(5);
       for (const x of r.filter((x) => x.status === "rejected") as PromiseRejectedResult[]) expect(x.reason).toMatchObject({ status: 409, code: "type_limit" });
     });
@@ -361,7 +379,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
       await sql`update ticket_type set issued = 0 where id = ${type.id}`;
       await EV.updateEvent(org, e.id, { version: 1, status: "published" });
       await expect(TT.deleteTicketType(org, e.id, type.id)).rejects.toMatchObject({ status: 409, code: "last_ticket_type" });
-      const { ticketType: second } = await TT.createTicketType(org, e.id, { name: "Second", capacity: 2 });
+      const { ticketType: second } = await TT.createTicketType(org, e.id, { name: "Second", capacity: 2, clientOpId: crypto.randomUUID() });
       await expect(TT.deleteTicketType(org, e.id, type.id)).resolves.toEqual({ deleted: true });
       expect((await fresh(e.id)).ticketTypes.map((t) => t.id)).toEqual([second.id]);
     });
@@ -481,7 +499,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
       const racer = await makeUser(sql, P, "racer", "organizer");
       const a = (await EV.createEvent(racer, eventInput({ title: "Race A" }))).event;
       const b = (await EV.createEvent(racer, eventInput({ title: "Race B" }))).event;
-      await TT.createTicketType(racer, a.id, { name: "General", capacity: 50 });
+      await TT.createTicketType(racer, a.id, { name: "General", capacity: 50, clientOpId: crypto.randomUUID() });
       await EV.updateEvent(racer, a.id, { version: 1, status: "published" });
       await ST.createInvite(racer, a.id, op());
       const ops: Promise<unknown>[] = [];
@@ -489,8 +507,8 @@ describe.skipIf(!url)("events (Postgres)", () => {
         ops.push(
           EV.updateEvent(racer, a.id, { version: 1 + round, title: `Race A ${round}` }),
           EV.updateEvent(racer, b.id, { version: 1 + round, title: `Race B ${round}` }),
-          TT.createTicketType(racer, a.id, { name: `R${round}`, capacity: 5 }),
-          TT.createTicketType(racer, b.id, { name: `R${round}`, capacity: 5 }),
+          TT.createTicketType(racer, a.id, { name: `R${round}`, capacity: 5, clientOpId: crypto.randomUUID() }),
+          TT.createTicketType(racer, b.id, { name: `R${round}`, capacity: 5, clientOpId: crypto.randomUUID() }),
           ST.createInvite(racer, b.id, op()),
           EV.createEvent(racer, eventInput({ title: `Racing ${round}` })),
           AD.hideEvent(admin, a.id, { hidden: round % 2 === 0, reason: "race", clientOpId: crypto.randomUUID() }),

@@ -79,9 +79,11 @@ describe("event schemas", () => {
   });
 
   it("ticket type, invite, hide and role inputs", () => {
-    expect(newTicketTypeInput.safeParse({ name: "GA", capacity: 5000 }).success).toBe(true);
-    expect(newTicketTypeInput.safeParse({ name: "GA", capacity: 5001 }).success).toBe(false);
-    expect(newTicketTypeInput.safeParse({ name: "G\0A", capacity: 5 }).success).toBe(false);
+    const typeOp = crypto.randomUUID();
+    expect(newTicketTypeInput.safeParse({ name: "GA", capacity: 5000, clientOpId: typeOp }).success).toBe(true);
+    expect(newTicketTypeInput.safeParse({ name: "GA", capacity: 5000 }).success).toBe(false); // the op id is required
+    expect(newTicketTypeInput.safeParse({ name: "GA", capacity: 5001, clientOpId: typeOp }).success).toBe(false);
+    expect(newTicketTypeInput.safeParse({ name: "G\0A", capacity: 5, clientOpId: typeOp }).success).toBe(false);
     expect(updateTicketTypeInput.safeParse({ version: 1 }).success).toBe(false);
     expect(inviteTokenInput.safeParse({ token: "anything" }).success).toBe(true);
     expect(inviteTokenInput.safeParse({ token: "a\0" }).success).toBe(false);

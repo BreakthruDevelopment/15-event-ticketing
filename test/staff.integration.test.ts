@@ -34,7 +34,7 @@ describe.skipIf(!url)("door staff (Postgres)", () => {
   const door = (a: TestActor, id = event.id) => AC.resolveDoorAccess(D, a, id);
   const mkEvent = async (who = org, o: Record<string, unknown> = {}) => {
     const e = (await EV.createEvent(who, openDoorInput(o))).event;
-    await TT.createTicketType(who, e.id, { name: "General", capacity: 10 });
+    await TT.createTicketType(who, e.id, { name: "General", capacity: 10, clientOpId: crypto.randomUUID() });
     await EV.updateEvent(who, e.id, { version: 1, status: "published" });
     return e;
   };
