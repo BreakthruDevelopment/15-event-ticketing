@@ -19,6 +19,7 @@ import {
   updateEventInput,
 } from "@/lib/event-schema";
 import { log } from "@/lib/log";
+import { withOp } from "@/lib/op-ledger";
 import { type Tx } from "@/lib/usage";
 import { writeTx } from "@/lib/write-tx";
 
@@ -208,39 +209,43 @@ export async function createEvent(actor: Actor | null, input: unknown): Promise<
     checkinOpensAt: data.checkinOpensAt ?? defaults.checkinOpensAt,
   };
   checkTimes(times);
-  const { id, created } = await writeTx(actor, "event:manage", async (tx) => {
-    const [existing] = await tx
-      .select({ id: E.id })
-      .from(E)
-      .where(and(eq(E.organizerId, actor.id), eq(E.clientOpId, data.clientOpId)));
-    if (existing) return { id: existing.id, created: false };
+  // The op ledger outlives the event: a late retry of a create whose event was deleted since returns 409 `event_deleted`
+  // instead of making a new draft.
+  const out = await writeTx(actor, "event:manage", (tx) =>
+    withOp(tx, actor.id, { kind: "event-create", clientOpId: data.clientOpId, payload: "create" }, async () => {
+      const [{ mine }] = await tx.select({ mine: count() }).from(E).where(eq(E.organizerId, actor.id));
+      if (mine >= LIMITS.eventsPerOrganizer) {
+        throw new CodedConflictError("event_limit", `You can have at most ${LIMITS.eventsPerOrganizer} events. Delete a draft or a cancelled event first.`);
+      }
 
-    const [{ mine }] = await tx.select({ mine: count() }).from(E).where(eq(E.organizerId, actor.id));
-    if (mine >= LIMITS.eventsPerOrganizer) {
-      throw new CodedConflictError("event_limit", `You can have at most ${LIMITS.eventsPerOrganizer} events. Delete a draft or a cancelled event first.`);
-    }
-
-    const values = {
-      organizerId: actor.id,
-      title: data.title,
-      description: data.description,
-      venueName: data.venueName,
-      address: data.address,
-      timeZone: data.timeZone,
-      ...times,
-      maxPerRegistration: data.maxPerRegistration,
-      contactEmail: data.contactEmail,
-      clientOpId: data.clientOpId,
-    };
-    // `on conflict (slug) do nothing` keeps the transaction alive on a taken slug, so an auto-generated one can retry.
-    const attempts = data.slug ? 1 : 5;
-    for (let i = 0; i < attempts; i++) {
-      const slug = data.slug ?? `${slugStem(data.title)}-${randomSuffix()}`;
-      const [row] = await tx.insert(E).values({ ...values, slug }).onConflictDoNothing({ target: E.slug }).returning({ id: E.id });
-      if (row) return { id: row.id, created: true };
-    }
-    throw new CodedConflictError("slug_taken", data.slug ? "That address is taken. Pick another." : "Couldn't make an address for this event. Try again.");
-  });
+      const values = {
+        organizerId: actor.id,
+        title: data.title,
+        description: data.description,
+        venueName: data.venueName,
+        address: data.address,
+        timeZone: data.timeZone,
+        ...times,
+        maxPerRegistration: data.maxPerRegistration,
+        contactEmail: data.contactEmail,
+        clientOpId: data.clientOpId,
+      };
+      // `on conflict (slug) do nothing` keeps the transaction alive on a taken slug, so an auto-generated one can retry.
+      const attempts = data.slug ? 1 : 5;
+      for (let i = 0; i < attempts; i++) {
+        const slug = data.slug ?? `${slugStem(data.title)}-${randomSuffix()}`;
+        const [row] = await tx.insert(E).values({ ...values, slug }).onConflictDoNothing({ target: E.slug }).returning({ id: E.id });
+        if (row) return { id: row.id };
+      }
+      throw new CodedConflictError("slug_taken", data.slug ? "That address is taken. Pick another." : "Couldn't make an address for this event. Try again.");
+    }),
+  );
+  const created = !out.replayed;
+  const id = out.result.id;
+  if (!created) {
+    const [still] = await db().select({ id: E.id }).from(E).where(and(eq(E.id, id), eq(E.organizerId, actor.id)));
+    if (!still) throw new CodedConflictError("event_deleted", "That event was deleted. Create it again with a new request.");
+  }
   return { event: await getMyEvent(actor, id), created };
 }
 

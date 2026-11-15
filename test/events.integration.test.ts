@@ -72,6 +72,15 @@ describe.skipIf(!url)("events (Postgres)", () => {
       expect(Object.keys(e)).not.toContain("organizerId");
     });
 
+    it("a late retry of a create whose event was deleted doesn't bring it back (409 event_deleted)", async () => {
+      const input = eventInput({ title: "Deleted then retried" });
+      const first = await EV.createEvent(org, input);
+      await EV.deleteEvent(org, first.event.id);
+      await expect(EV.createEvent(org, input)).rejects.toMatchObject({ status: 409, code: "event_deleted" });
+      const [{ n }] = await sql`select count(*)::int as n from event where organizer_id = ${org.id} and client_op_id = ${input.clientOpId}`;
+      expect(n).toBe(0);
+    });
+
     it("a duplicate client_op_id makes one event, sequentially and in parallel", async () => {
       const input = eventInput({ title: "Once" });
       const first = await EV.createEvent(org, input);
