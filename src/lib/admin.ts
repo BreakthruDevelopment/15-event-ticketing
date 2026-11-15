@@ -7,6 +7,7 @@ import { env } from "@/lib/env";
 import { ConflictError, NotFoundError } from "@/lib/errors";
 import { ORGANIZER_REVOKED, hideInput, idParam } from "@/lib/event-schema";
 import { log } from "@/lib/log";
+import { withOp } from "@/lib/op-ledger";
 import { dailyCount } from "@/lib/usage";
 import { writeTx } from "@/lib/write-tx";
 
@@ -56,7 +57,8 @@ export async function adminStats(actor: Actor | null) {
  * Hiding over an `organizer_revoked` hide replaces that reason with the admin's, so a later re-grant of `organizer`
  * does not unhide it; hiding an already admin-hidden event changes nothing. An event hidden because its organiser was
  * revoked can't be unhidden here: grant the role again. Unhiding is refused while the owner isn't an organiser.
- * Hiding doesn't change the event's `version`.
+ * Hiding doesn't change the event's `version`. `clientOpId` is required (`op_ledger`): a late retry of an unhide returns
+ * the first result and doesn't clear a newer hide by another admin.
  *
  * Lock order (see `lockActor`): the admin's row FOR SHARE, the admin's allowance, the owner's row FOR SHARE (so an
  * unhide can't race a revoke: either the revoke committed first and we see `user`, or it waits for us and then hides
@@ -65,9 +67,11 @@ export async function adminStats(actor: Actor | null) {
 export async function hideEvent(actor: Actor | null, rawId: string, input: unknown) {
   assertCan(actor, "admin:hide");
   const id = idParam.parse(rawId);
-  const { hidden, reason } = hideInput.parse(input);
+  const data = hideInput.parse(input);
+  const { hidden, reason } = data;
   const E = schema.event;
-  const result = await writeTx(actor, "admin:hide", async (tx) => {
+  const out = await writeTx(actor, "admin:hide", (tx) =>
+    withOp(tx, actor.id, { kind: "hide", clientOpId: data.clientOpId, payload: `${id}\n${data.hidden}\n${data.reason ?? ""}` }, async () => {
     const [peek] = await tx.select({ organizerId: E.organizerId }).from(E).where(eq(E.id, id));
     if (!peek) throw new NotFoundError();
     const [owner] = await tx.select({ role: schema.user.role }).from(schema.user).where(eq(schema.user.id, peek.organizerId)).for("share");
@@ -89,8 +93,10 @@ export async function hideEvent(actor: Actor | null, rawId: string, input: unkno
     if (!owner || toRole(owner.role) !== "organizer") throw new ConflictError("This event's owner is no longer an organiser.");
     await tx.update(E).set({ hiddenAt: null, hiddenReason: null }).where(eq(E.id, id));
     return { id, hidden: false, changed: true };
-  });
-  if (result.changed) log.info(result.hidden ? "event.hidden" : "event.unhidden", { actorId: actor.id, eventId: id });
-  return result;
+    }),
+  );
+  const result = out.result;
+  if (!out.replayed && result.changed) log.info(result.hidden ? "event.hidden" : "event.unhidden", { actorId: actor.id, eventId: id });
+  return { ...result, replayed: out.replayed };
 }
 

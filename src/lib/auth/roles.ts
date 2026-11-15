@@ -1,12 +1,12 @@
 import "server-only";
-import { createHash } from "node:crypto";
 import { and, eq, isNull } from "drizzle-orm";
 import { assertCan } from "@/lib/access";
 import { type Actor, type Role, toRole } from "@/lib/auth/rbac";
 import { schema } from "@/lib/db";
-import { CodedConflictError, ConflictError, NotFoundError, VersionConflictError } from "@/lib/errors";
+import { ConflictError, NotFoundError, VersionConflictError } from "@/lib/errors";
 import { ORGANIZER_REVOKED, roleInput } from "@/lib/event-schema";
 import { log } from "@/lib/log";
+import { withOp } from "@/lib/op-ledger";
 import { writeTx } from "@/lib/write-tx";
 
 export type RoleChange = {
@@ -19,8 +19,6 @@ export type RoleChange = {
   unhidden: number;
 };
 
-const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
-
 /**
  * The only way a role changes (`POST /api/admin/roles`): Better Auth's own set-role, create-user, update-user and
  * remove-user are disabled, so nothing can skip the hide/unhide below.
@@ -29,7 +27,7 @@ const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
  *  - `from` is the role the admin saw when they decided. It is applied only if the user still has that role;
  *    otherwise 409 `version_conflict` with `current: { userId, role }`, so a stale tab or a retry can't silently undo
  *    someone else's change.
- *  - `clientOpId` is a replay ledger (`role_change_op`, unique per admin). It is required because `from` alone can't stop
+ *  - `clientOpId` is a replay ledger (`op_ledger`, unique per admin). It is required because `from` alone can't stop
  *    a delayed retry of "grant" after a later "revoke" (the `from` check would pass again). An exact retry returns the
  *    first result with `replayed: true` and changes nothing, even after the role moved since; the same id with a
  *    different request is 409 `op_id_reused`. The ledger row and the result commit with the change, so a parallel duplicate waits for the first.
@@ -45,24 +43,8 @@ const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 export async function setUserRole(actor: Actor | null, input: unknown): Promise<RoleChange & { replayed: boolean }> {
   assertCan(actor, "admin:roles");
   const data = roleInput.parse(input);
-  const hash = sha256(`${data.userId}\n${data.role}\n${data.from}`);
-  const out = await writeTx(actor, "admin:roles", async (tx) => {
-    // The unique key makes a parallel duplicate wait for the first transaction, then see its stored result.
-    const [mine] = await tx
-      .insert(schema.roleChangeOp)
-      .values({ adminId: actor.id, clientOpId: data.clientOpId, payloadHash: hash })
-      .onConflictDoNothing()
-      .returning({ id: schema.roleChangeOp.clientOpId });
-    if (!mine) {
-      const [first] = await tx
-        .select()
-        .from(schema.roleChangeOp)
-        .where(and(eq(schema.roleChangeOp.adminId, actor.id), eq(schema.roleChangeOp.clientOpId, data.clientOpId)));
-      if (first && first.payloadHash !== hash) throw new CodedConflictError("op_id_reused", "That request id was already used for a different change.");
-      if (first?.result) return { replayed: true as const, result: first.result as unknown as RoleChange };
-      throw new CodedConflictError("retry", "That role change is still running. Try again.");
-    }
-
+  const out = await writeTx(actor, "admin:roles", (tx) =>
+    withOp(tx, actor.id, { kind: "role", clientOpId: data.clientOpId, payload: `${data.userId}\n${data.role}\n${data.from}` }, async () => {
     // An admin's role never changes in this app, so a plain read can refuse an admin target without locking its row
     // (locking admins would let two admins deadlock on each other's rows).
     const [peek] = await tx.select({ role: schema.user.role }).from(schema.user).where(eq(schema.user.id, data.userId));
@@ -96,12 +78,9 @@ export async function setUserRole(actor: Actor | null, input: unknown): Promise<
         result.unhidden = rows.length;
       }
     }
-    await tx
-      .update(schema.roleChangeOp)
-      .set({ result })
-      .where(and(eq(schema.roleChangeOp.adminId, actor.id), eq(schema.roleChangeOp.clientOpId, data.clientOpId)));
-    return { replayed: false as const, result };
-  });
+    return result;
+    }),
+  );
   if (!out.replayed && out.result.changed) {
     log.info("role.changed", { actorId: actor.id, userId: out.result.userId, from: out.result.previous, to: out.result.role, hidden: out.result.hidden, unhidden: out.result.unhidden });
   }

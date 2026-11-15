@@ -85,10 +85,12 @@ describe("event schemas", () => {
     expect(updateTicketTypeInput.safeParse({ version: 1 }).success).toBe(false);
     expect(inviteTokenInput.safeParse({ token: "anything" }).success).toBe(true);
     expect(inviteTokenInput.safeParse({ token: "a\0" }).success).toBe(false);
-    expect(hideInput.safeParse({ hidden: true }).success).toBe(false);
-    expect(hideInput.safeParse({ hidden: true, reason: "organizer_revoked" }).success).toBe(false);
-    expect(hideInput.safeParse({ hidden: true, reason: "spam" }).success).toBe(true);
-    expect(hideInput.safeParse({ hidden: false }).success).toBe(true);
+    const opId = crypto.randomUUID();
+    expect(hideInput.safeParse({ hidden: true, clientOpId: opId }).success).toBe(false);
+    expect(hideInput.safeParse({ hidden: true, reason: "organizer_revoked", clientOpId: opId }).success).toBe(false);
+    expect(hideInput.safeParse({ hidden: true, reason: "spam", clientOpId: opId }).success).toBe(true);
+    expect(hideInput.safeParse({ hidden: false, clientOpId: opId }).success).toBe(true);
+    expect(hideInput.safeParse({ hidden: false }).success).toBe(false); // the op id is required
     const r = { userId: "u", role: "organizer", from: "user", clientOpId: crypto.randomUUID() };
     expect(roleInput.safeParse(r).success).toBe(true);
     expect(roleInput.safeParse({ userId: "u", role: "organizer", clientOpId: r.clientOpId }).success).toBe(false); // `from` is required

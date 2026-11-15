@@ -5,7 +5,7 @@ import { NO_STORE, errorResponse, readJson } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
-/** POST /api/admin/events/:id/hide : body `{ hidden: boolean, reason?: string }`. A reason is required to hide. */
+/** POST /api/admin/events/:id/hide : body `{ hidden: boolean, reason?: string, clientOpId }`. A reason is required to hide; a retry with the same `clientOpId` replays the first result. */
 export async function POST(request: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
     requireSameOrigin(request);

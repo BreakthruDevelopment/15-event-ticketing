@@ -154,7 +154,12 @@ export const inviteTokenInput = z.strictObject({ token: idText });
 export const ORGANIZER_REVOKED = "organizer_revoked";
 
 export const hideInput = z
-  .strictObject({ hidden: z.boolean(), reason: text(200).optional() })
+  .strictObject({
+    hidden: z.boolean(),
+    reason: text(200).optional(),
+    /** One id per click (`opFor`), required: a late retry of an unhide must not clear a newer hide by another admin. */
+    clientOpId,
+  })
   .refine((v) => !v.hidden || (v.reason && v.reason.length > 0), "A reason is required to hide an event")
   .refine((v) => v.reason?.toLowerCase() !== ORGANIZER_REVOKED, "That reason is reserved");
 
@@ -170,6 +175,9 @@ export const roleInput = z.strictObject({
    */
   clientOpId,
 });
+
+/** Body of the staff-removal DELETE: a late retry must not remove a membership the organiser granted again in between. */
+export const removeStaffInput = z.strictObject({ clientOpId });
 
 export const idParam = uuidText;
 export const slugParam = idText;

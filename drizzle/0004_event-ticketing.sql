@@ -85,6 +85,16 @@ CREATE TABLE "faq_entry" (
 	CONSTRAINT "faq_entry_lengths_chk" CHECK (char_length("faq_entry"."question") between 1 and 200 and char_length("faq_entry"."answer") between 1 and 800)
 );
 --> statement-breakpoint
+CREATE TABLE "op_ledger" (
+	"actor_id" text NOT NULL,
+	"client_op_id" uuid NOT NULL,
+	"kind" text NOT NULL,
+	"payload_hash" text NOT NULL,
+	"result" jsonb,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "op_ledger_actor_id_client_op_id_pk" PRIMARY KEY("actor_id","client_op_id")
+);
+--> statement-breakpoint
 CREATE TABLE "registration" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"event_id" uuid NOT NULL,
@@ -98,15 +108,6 @@ CREATE TABLE "registration" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "registration_status_chk" CHECK ("registration"."status" in ('active', 'cancelled')),
 	CONSTRAINT "registration_quantity_chk" CHECK ("registration"."quantity" between 1 and 10)
-);
---> statement-breakpoint
-CREATE TABLE "role_change_op" (
-	"admin_id" text NOT NULL,
-	"client_op_id" uuid NOT NULL,
-	"payload_hash" text NOT NULL,
-	"result" jsonb,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "role_change_op_admin_id_client_op_id_pk" PRIMARY KEY("admin_id","client_op_id")
 );
 --> statement-breakpoint
 CREATE TABLE "staff_invite" (
@@ -172,10 +173,10 @@ ALTER TABLE "event_staff" ADD CONSTRAINT "event_staff_user_id_user_id_fk" FOREIG
 ALTER TABLE "event_staff" ADD CONSTRAINT "event_staff_invited_by_user_id_fk" FOREIGN KEY ("invited_by") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "faq_ask" ADD CONSTRAINT "faq_ask_event_id_event_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."event"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "faq_entry" ADD CONSTRAINT "faq_entry_event_id_event_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."event"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "op_ledger" ADD CONSTRAINT "op_ledger_actor_id_user_id_fk" FOREIGN KEY ("actor_id") REFERENCES "public"."user"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "registration" ADD CONSTRAINT "registration_event_id_event_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."event"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "registration" ADD CONSTRAINT "registration_ticket_type_id_ticket_type_id_fk" FOREIGN KEY ("ticket_type_id") REFERENCES "public"."ticket_type"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "registration" ADD CONSTRAINT "registration_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "role_change_op" ADD CONSTRAINT "role_change_op_admin_id_user_id_fk" FOREIGN KEY ("admin_id") REFERENCES "public"."user"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "staff_invite" ADD CONSTRAINT "staff_invite_event_id_event_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."event"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "staff_invite" ADD CONSTRAINT "staff_invite_used_by_user_id_fk" FOREIGN KEY ("used_by") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "staff_invite" ADD CONSTRAINT "staff_invite_created_by_user_id_fk" FOREIGN KEY ("created_by") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint

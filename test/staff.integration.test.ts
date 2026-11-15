@@ -223,7 +223,7 @@ describe.skipIf(!url)("door staff (Postgres)", () => {
       const a = await newUser();
       await ST.acceptInvite(a, { token: inv.token });
       await expect(ST.acceptInvite(a, { token: inv.token })).resolves.toMatchObject({ eventId: event.id, replayed: true });
-      await ST.removeStaff(org, event.id, a.id);
+      await ST.removeStaff(org, event.id, a.id, op());
       await expect(ST.acceptInvite(a, { token: inv.token })).rejects.toMatchObject({ status: 404 });
     });
 
@@ -257,7 +257,7 @@ describe.skipIf(!url)("door staff (Postgres)", () => {
       const ops: Promise<unknown>[] = [];
       users.forEach((u, i) => {
         ops.push(ST.acceptInvite(u, { token: tokenOf(invs[i].link) }));
-        ops.push(ST.removeStaff(org, e.id, u.id));
+        ops.push(ST.removeStaff(org, e.id, u.id, op()));
         ops.push(ST.revokeInvite(org, e.id, invs[i].id));
         ops.push(ST.createInvite(org, e.id, op()));
       });
@@ -272,10 +272,26 @@ describe.skipIf(!url)("door staff (Postgres)", () => {
       const a = await newUser();
       await ST.acceptInvite(a, { token: (await invite()).token });
       await expect(door(a)).resolves.toMatchObject({ via: "staff" });
-      await expect(ST.removeStaff(org, event.id, a.id)).resolves.toEqual({ removed: true });
+      await expect(ST.removeStaff(org, event.id, a.id, op())).resolves.toEqual({ removed: true, replayed: false });
       await expect(door(a)).rejects.toMatchObject({ status: 404 });
-      await expect(ST.removeStaff(org, event.id, a.id)).resolves.toEqual({ removed: false });
-      await expect(ST.removeStaff(org2, event.id, a.id)).rejects.toMatchObject({ status: 404 });
+      await expect(ST.removeStaff(org, event.id, a.id, op())).resolves.toEqual({ removed: false, replayed: false });
+      await expect(ST.removeStaff(org2, event.id, a.id, op())).rejects.toMatchObject({ status: 404 });
+    });
+
+    it("a late retry of a removal returns the first result and doesn't remove a membership granted again in between", async () => {
+      const a = await newUser();
+      await ST.acceptInvite(a, { token: (await invite()).token });
+      const body = op();
+      await expect(ST.removeStaff(org, event.id, a.id, body)).resolves.toEqual({ removed: true, replayed: false });
+      await ST.acceptInvite(a, { token: (await invite()).token }); // re-invited and accepted
+      await expect(door(a)).resolves.toMatchObject({ via: "staff" });
+      await expect(ST.removeStaff(org, event.id, a.id, body)).resolves.toEqual({ removed: true, replayed: true });
+      await expect(door(a)).resolves.toMatchObject({ via: "staff" }); // the late retry changed nothing
+      // The same op id for another staffer or event is a different request.
+      await expect(ST.removeStaff(org, event.id, "someone-else", body)).rejects.toMatchObject({ status: 409, code: "op_id_reused" });
+      // No op id, no removal.
+      for (const bad of [undefined, null, {}, { clientOpId: "x" }]) expect((await ST.removeStaff(org, event.id, a.id, bad).catch((e) => e)).name).toBe("ZodError");
+      await expect(door(a)).resolves.toMatchObject({ via: "staff" });
     });
 
     it("removing staff of this event doesn't touch their staff rows on another event", async () => {
@@ -283,7 +299,7 @@ describe.skipIf(!url)("door staff (Postgres)", () => {
       const a = await newUser();
       await ST.acceptInvite(a, { token: (await invite()).token });
       await ST.acceptInvite(a, { token: (await invite(e2.id)).token });
-      await ST.removeStaff(org, event.id, a.id);
+      await ST.removeStaff(org, event.id, a.id, op());
       await expect(door(a, event.id)).rejects.toMatchObject({ status: 404 });
       await expect(door(a, e2.id)).resolves.toMatchObject({ via: "staff" });
     });

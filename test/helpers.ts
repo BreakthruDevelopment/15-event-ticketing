@@ -17,7 +17,7 @@ export async function cleanup(sql: postgres.Sql, prefix: string) {
   await sql`delete from registration where user_id like ${like}`;
   await sql`delete from event_staff where user_id like ${like}`;
   await sql`delete from event where organizer_id like ${like}`;
-  await sql`delete from role_change_op where admin_id like ${like}`;
+  await sql`delete from op_ledger where actor_id like ${like}`;
   await sql`delete from "user" where id like ${like}`;
 }
 

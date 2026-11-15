@@ -233,7 +233,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
         ["createInvite", (b) => ST.createInvite(org, b, op())],
         ["revokeInvite event", (b) => ST.revokeInvite(org, b, ghost())],
         ["revokeInvite invite", (b) => ST.revokeInvite(org, e.id, b)],
-        ["removeStaff event", (b) => ST.removeStaff(org, b, "someone")],
+        ["removeStaff event", (b) => ST.removeStaff(org, b, "someone", op())],
       ];
       for (const [name, call] of calls) {
         for (const bad of bads) {
@@ -242,7 +242,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
         }
       }
       // removeStaff's user id is text, not a uuid: only NUL and empty are malformed.
-      for (const bad of ["a" + nul, ""]) expect((await ST.removeStaff(org, e.id, bad).catch((x) => x)).name).toBe("ZodError");
+      for (const bad of ["a" + nul, ""]) expect((await ST.removeStaff(org, e.id, bad, op()).catch((x) => x)).name).toBe("ZodError");
       // Well formed but unknown: 404 (not 400, not 500).
       for (const call of [
         () => EV.getMyEvent(org, ghost()),
@@ -254,7 +254,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
         () => ST.listStaff(org, ghost()),
         () => ST.createInvite(org, ghost(), op()),
         () => ST.revokeInvite(org, ghost(), ghost()),
-        () => ST.removeStaff(org, ghost(), "someone"),
+        () => ST.removeStaff(org, ghost(), "someone", op()),
       ]) {
         await expect(call()).rejects.toMatchObject({ status: 404 });
       }
@@ -263,12 +263,12 @@ describe.skipIf(!url)("events (Postgres)", () => {
     it("public, admin and role functions", async () => {
       for (const bad of ["abc" + nul, nul, ""]) {
         expect((await EV.getPublicEventBySlug(bad).catch((x) => x)).name, JSON.stringify(bad)).toBe("ZodError");
-        expect((await AD.hideEvent(admin, bad, { hidden: false }).catch((x) => x)).name).toBe("ZodError");
+        expect((await AD.hideEvent(admin, bad, { hidden: false, clientOpId: crypto.randomUUID() }).catch((x) => x)).name).toBe("ZodError");
         expect((await R.setUserRole(admin, { userId: bad, role: "user", from: "user", clientOpId: crypto.randomUUID() }).catch((x) => x)).name).toBe("ZodError");
         expect((await ST.acceptInvite(attendee, { token: bad }).catch((x) => x)).name).toBe(bad === "" ? "ZodError" : "ZodError");
       }
       await expect(EV.getPublicEventBySlug("no-such-event-slug")).rejects.toMatchObject({ status: 404 });
-      await expect(AD.hideEvent(admin, ghost(), { hidden: false })).rejects.toMatchObject({ status: 404 });
+      await expect(AD.hideEvent(admin, ghost(), { hidden: false, clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 404 });
       for (const q of [{ limit: "0" }, { limit: "101" }, { limit: "x" }, { past: "yes" }, { limit: "5\0" }, { other: "1" }]) {
         expect((await EV.listPublicEvents(q).catch((x) => x)).name, JSON.stringify(q)).toBe("ZodError");
       }
@@ -427,7 +427,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
       const draft = await mk({ title: "Still draft" });
       const { event: hid } = await withType({ title: "Hidden one" });
       await EV.updateEvent(org, hid.id, { version: 1, status: "published" });
-      await AD.hideEvent(admin, hid.id, { hidden: true, reason: "test hide" });
+      await AD.hideEvent(admin, hid.id, { hidden: true, reason: "test hide", clientOpId: crypto.randomUUID() });
       await sql`update ticket_type set issued = 2 where event_id = ${pub.id}`;
 
       const { events } = await EV.listPublicEvents({ limit: "100" });
@@ -493,7 +493,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
           TT.createTicketType(racer, b.id, { name: `R${round}`, capacity: 5 }),
           ST.createInvite(racer, b.id, op()),
           EV.createEvent(racer, eventInput({ title: `Racing ${round}` })),
-          AD.hideEvent(admin, a.id, { hidden: round % 2 === 0, reason: "race" }),
+          AD.hideEvent(admin, a.id, { hidden: round % 2 === 0, reason: "race", clientOpId: crypto.randomUUID() }),
           R.setUserRole(admin, { userId: racer.id, role: round % 2 === 0 ? "user" : "organizer", from: round % 2 === 0 ? "organizer" : "user", clientOpId: crypto.randomUUID() }),
         );
       }

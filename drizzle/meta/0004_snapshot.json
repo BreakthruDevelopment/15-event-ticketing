@@ -1,5 +1,5 @@
 {
-  "id": "0427be55-2dbf-4bd7-8bcd-627829deb39b",
+  "id": "f89b312d-0d60-4b83-8967-69681193e0d4",
   "prevId": "a3bc9bdb-aa03-4674-b367-de912f6fcc46",
   "version": "7",
   "dialect": "postgresql",
@@ -1327,6 +1327,78 @@
       },
       "isRLSEnabled": false
     },
+    "public.op_ledger": {
+      "name": "op_ledger",
+      "schema": "",
+      "columns": {
+        "actor_id": {
+          "name": "actor_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "client_op_id": {
+          "name": "client_op_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payload_hash": {
+          "name": "payload_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "result": {
+          "name": "result",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "op_ledger_actor_id_user_id_fk": {
+          "name": "op_ledger_actor_id_user_id_fk",
+          "tableFrom": "op_ledger",
+          "tableTo": "user",
+          "columnsFrom": [
+            "actor_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "op_ledger_actor_id_client_op_id_pk": {
+          "name": "op_ledger_actor_id_client_op_id_pk",
+          "columns": [
+            "actor_id",
+            "client_op_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.rate_event": {
       "name": "rate_event",
       "schema": "",
@@ -1617,72 +1689,6 @@
           "value": "\"registration\".\"quantity\" between 1 and 10"
         }
       },
-      "isRLSEnabled": false
-    },
-    "public.role_change_op": {
-      "name": "role_change_op",
-      "schema": "",
-      "columns": {
-        "admin_id": {
-          "name": "admin_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "client_op_id": {
-          "name": "client_op_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "payload_hash": {
-          "name": "payload_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "result": {
-          "name": "result",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "role_change_op_admin_id_user_id_fk": {
-          "name": "role_change_op_admin_id_user_id_fk",
-          "tableFrom": "role_change_op",
-          "tableTo": "user",
-          "columnsFrom": [
-            "admin_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "role_change_op_admin_id_client_op_id_pk": {
-          "name": "role_change_op_admin_id_client_op_id_pk",
-          "columns": [
-            "admin_id",
-            "client_op_id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.session": {

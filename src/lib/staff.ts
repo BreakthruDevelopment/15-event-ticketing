@@ -6,9 +6,10 @@ import { type Actor, toRole } from "@/lib/auth/rbac";
 import { db, schema } from "@/lib/db";
 import { env } from "@/lib/env";
 import { CodedConflictError, NotFoundError } from "@/lib/errors";
-import { LIMITS, idParam, inviteTokenInput, newInviteInput } from "@/lib/event-schema";
+import { LIMITS, idParam, inviteTokenInput, newInviteInput, removeStaffInput } from "@/lib/event-schema";
 import { lockOwnEvent } from "@/lib/events";
 import { log } from "@/lib/log";
+import { withOp } from "@/lib/op-ledger";
 import { idText } from "@/lib/text";
 import { writeTx } from "@/lib/write-tx";
 
@@ -124,17 +125,24 @@ export async function revokeInvite(actor: Actor | null, rawEventId: string, rawI
   });
 }
 
-/** Remove a staffer. Their next door request is a 404. A second call answers `removed: false`. */
-export async function removeStaff(actor: Actor | null, rawEventId: string, rawUserId: string): Promise<{ removed: boolean }> {
+/**
+ * Remove a staffer. Their next door request is a 404. Body `{ clientOpId }`, required (`op_ledger`): a late retry of a
+ * removal returns the first result and doesn't remove a membership the organiser granted again in between (re-invited,
+ * accepted, then the old DELETE arrives). A new id for a staffer who is already gone answers `removed: false`.
+ */
+export async function removeStaff(actor: Actor | null, rawEventId: string, rawUserId: string, input: unknown): Promise<{ removed: boolean; replayed: boolean }> {
   assertCan(actor, "event:manage");
   const userId = idText.parse(rawUserId);
+  const { clientOpId } = removeStaffInput.parse(input);
   const out = await writeTx(actor, "event:manage", async (tx) => {
     const ev = await lockOwnEvent(tx, actor, rawEventId);
-    const rows = await tx.delete(S).where(and(eq(S.eventId, ev.id), eq(S.userId, userId))).returning({ userId: S.userId });
-    return { removed: rows.length > 0, eventId: ev.id };
+    return withOp(tx, actor.id, { kind: "staff-remove", clientOpId, payload: `${ev.id}\n${userId}` }, async () => {
+      const rows = await tx.delete(S).where(and(eq(S.eventId, ev.id), eq(S.userId, userId))).returning({ userId: S.userId });
+      return { removed: rows.length > 0, eventId: ev.id };
+    });
   });
-  if (out.removed) log.info("staff.removed", { actorId: actor.id, eventId: out.eventId, userId });
-  return { removed: out.removed };
+  if (!out.replayed && out.result.removed) log.info("staff.removed", { actorId: actor.id, eventId: out.result.eventId, userId });
+  return { removed: out.result.removed, replayed: out.replayed };
 }
 
 /**

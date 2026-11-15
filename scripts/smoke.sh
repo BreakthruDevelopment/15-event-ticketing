@@ -47,6 +47,7 @@ trap cleanup EXIT
 
 command -v jq >/dev/null || fail "jq is required"
 [ -n "${SMOKE_ORGANIZER_EMAIL:-}" ] && [ -n "${SMOKE_ORGANIZER_PASSWORD:-}" ] || fail "SMOKE_ORGANIZER_EMAIL and SMOKE_ORGANIZER_PASSWORD are required"
+uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen; }
 iso_in() { date -u -d "+$1 seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+"$1"S +%Y-%m-%dT%H:%M:%SZ; }
 
 health=$(curl -fsS "$BASE_URL/api/health") || fail "health endpoint unreachable"
@@ -202,7 +203,11 @@ req "$JAR_C" GET /api/door/events
 echo "$BODY" | jq -e --arg id "$EVENT_ID" '.events | map(.id) | index($id) == null' >/dev/null || fail "a stranger sees the event at the door: $BODY"
 STAFF_ID=$(curl -fsS -b "$JAR_O" "$BASE_URL/api/organizer/events/$EVENT_ID/staff" | jq -r '.staff[0].userId')
 [ -n "$STAFF_ID" ] && [ "$STAFF_ID" != "null" ] || fail "the organiser's staff list is empty"
-req "$JAR_O" DELETE "/api/organizer/events/$EVENT_ID/staff/$STAFF_ID"; expect 200 "remove staff"
+REMOVE_OP="$(uuid)"
+req "$JAR_O" DELETE "/api/organizer/events/$EVENT_ID/staff/$STAFF_ID" '{}'; expect 400 "removing staff without a client op id"
+req "$JAR_O" DELETE "/api/organizer/events/$EVENT_ID/staff/$STAFF_ID" "{\"clientOpId\":\"$REMOVE_OP\"}"; expect 200 "remove staff"
+req "$JAR_O" DELETE "/api/organizer/events/$EVENT_ID/staff/$STAFF_ID" "{\"clientOpId\":\"$REMOVE_OP\"}"; expect 200 "replayed removal"
+[ "$(echo "$BODY" | jq -r '.replayed')" = "true" ] || fail "a replayed removal must say so: $BODY"
 req "$JAR_B" GET /api/door/events
 echo "$BODY" | jq -e --arg id "$EVENT_ID" '.events | map(.id) | index($id) == null' >/dev/null || fail "a removed staffer still sees the door: $BODY"
 req "$JAR_B" GET "/api/organizer/events/$EVENT_ID/staff"; expect 403 "staff on the organiser's staff list"
@@ -214,10 +219,14 @@ if [ -n "${SMOKE_ADMIN_EMAIL:-}" ] && [ -n "${SMOKE_ADMIN_PASSWORD:-}" ]; then
   echo "$BODY" | jq -e '.events.byStatus.published >= 1 and (.users | has("organizer"))' >/dev/null || fail "unexpected admin stats: $BODY"
   req "$JAR_O" GET /api/admin/stats; expect 403 "the organiser on admin stats"
   req "$JAR_ADM" GET "/api/organizer/events/$EVENT_ID"; expect 403 "an admin reading organiser content"
-  req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" '{"hidden":true}'; expect 400 "hiding without a reason"
-  req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" '{"hidden":true,"reason":"smoke test"}'; expect 200 "hide"
+  req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" "{\"hidden\":true,\"clientOpId\":\"$(uuid)\"}"; expect 400 "hiding without a reason"
+  req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" '{"hidden":true,"reason":"smoke test"}'; expect 400 "hiding without a client op id"
+  req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" "{\"hidden\":true,\"reason\":\"smoke test\",\"clientOpId\":\"$(uuid)\"}"; expect 200 "hide"
   req /dev/null GET "/api/events/by-slug/$SLUG"; expect 404 "a hidden event on the public page"
-  req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" '{"hidden":false}'; expect 200 "unhide"
+  UNHIDE_OP="$(uuid)"
+  req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" "{\"hidden\":false,\"clientOpId\":\"$UNHIDE_OP\"}"; expect 200 "unhide"
+  req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" "{\"hidden\":false,\"clientOpId\":\"$UNHIDE_OP\"}"; expect 200 "replayed unhide"
+  [ "$(echo "$BODY" | jq -r '.replayed')" = "true" ] || fail "a replayed unhide must say so: $BODY"
   req /dev/null GET "/api/events/by-slug/$SLUG"; expect 200 "an unhidden event on the public page"
   for path in /admin/set-role /admin/create-user /admin/update-user /admin/remove-user; do
     code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_ADM" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"userId":"x","role":"admin"}' "$BASE_URL/api/auth$path")

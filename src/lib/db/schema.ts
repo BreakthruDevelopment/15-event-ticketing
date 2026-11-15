@@ -486,20 +486,24 @@ export const faqAsk = pgTable(
   ],
 );
 
-/** Replay ledger for POST /api/admin/roles: a retry with the same `client_op_id` returns the first result and changes nothing. */
-export const roleChangeOp = pgTable(
-  "role_change_op",
+/**
+ * Replay ledger for mutations that must not be repeated by a late retry (role changes, admin hide and unhide, staff
+ * removal; src/lib/op-ledger.ts): one row per (actor, client op id), holding the first result.
+ */
+export const opLedger = pgTable(
+  "op_ledger",
   {
-    adminId: text("admin_id")
+    actorId: text("actor_id")
       .notNull()
       .references(() => user.id, { onDelete: "restrict" }),
     clientOpId: uuid("client_op_id").notNull(),
-    /** sha256 (hex) of the request (user, role, from): the same op id with another request is a 409. */
+    kind: text("kind").notNull(),
+    /** sha256 (hex) of the request: the same op id with another request is a 409 `op_id_reused`. */
     payloadHash: text("payload_hash").notNull(),
     result: jsonb("result").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.adminId, t.clientOpId] })],
+  (t) => [primaryKey({ columns: [t.actorId, t.clientOpId] })],
 );
 
 export type User = typeof user.$inferSelect;

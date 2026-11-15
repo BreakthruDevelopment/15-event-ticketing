@@ -51,7 +51,7 @@ describe.skipIf(!url)("admin permissions (Better Auth + Postgres)", () => {
   }
 
   async function cleanup() {
-    await sql`delete from role_change_op where admin_id in (select id from "user" where email like 'ap-%@test.local')`;
+    await sql`delete from op_ledger where actor_id in (select id from "user" where email like 'ap-%@test.local')`;
     await sql`delete from "user" where email like 'ap-%@test.local'`;
   }
 

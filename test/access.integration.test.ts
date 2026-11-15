@@ -114,9 +114,9 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
         () => ST.listStaff(attendee, live.id),
         () => ST.createInvite(attendee, live.id, op()),
         () => ST.revokeInvite(attendee, live.id, crypto.randomUUID()),
-        () => ST.removeStaff(attendee, live.id, staffer.id),
+        () => ST.removeStaff(attendee, live.id, staffer.id, op()),
         () => AD.adminStats(attendee),
-        () => AD.hideEvent(attendee, live.id, { hidden: true, reason: "x" }),
+        () => AD.hideEvent(attendee, live.id, { hidden: true, reason: "x", clientOpId: crypto.randomUUID() }),
         () => R.setUserRole(attendee, { userId: attendee.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() }),
       ];
       for (const [i, call] of calls.entries()) await expect(call(), `call ${i}`).rejects.toMatchObject({ status: 403 });
@@ -150,7 +150,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
           () => ST.listStaff(orgA, id),
           () => ST.createInvite(orgA, id, op()),
           () => ST.revokeInvite(orgA, id, crypto.randomUUID()),
-          () => ST.removeStaff(orgA, id, staffer.id),
+          () => ST.removeStaff(orgA, id, staffer.id, op()),
         ];
         for (const [i, call] of calls.entries()) await expect(call(), `${id === ghost ? "ghost" : "foreign"} call ${i}`).rejects.toMatchObject({ status: 404 });
       }
@@ -162,7 +162,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
 
     it("is blocked from admin functions (403)", async () => {
       await expect(AD.adminStats(orgA)).rejects.toMatchObject({ status: 403 });
-      await expect(AD.hideEvent(orgA, other.id, { hidden: true, reason: "x" })).rejects.toMatchObject({ status: 403 });
+      await expect(AD.hideEvent(orgA, other.id, { hidden: true, reason: "x", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 403 });
       await expect(R.setUserRole(orgA, { userId: orgB.id, role: "user", from: "organizer", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 403 });
     });
 
@@ -199,7 +199,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
         () => TT.deleteTicketType(admin, live.id, liveType),
         () => ST.listStaff(admin, live.id),
         () => ST.createInvite(admin, live.id, op()),
-        () => ST.removeStaff(admin, live.id, staffer.id),
+        () => ST.removeStaff(admin, live.id, staffer.id, op()),
         () => ST.acceptInvite(admin, { token: "whatever" }),
         () => ST.listDoorEvents(admin),
         () => AC.resolveDoorAccess(D, admin, live.id),
@@ -209,15 +209,15 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
 
     it("hides and unhides with a reason; the public page 404s while hidden; reserved and missing reasons are refused", async () => {
       const e = await publish(orgA, eventInput({ title: "To hide" }));
-      await expect(AD.hideEvent(admin, e.id, { hidden: true })).rejects.toMatchObject({ name: "ZodError" });
-      await expect(AD.hideEvent(admin, e.id, { hidden: true, reason: "organizer_revoked" })).rejects.toMatchObject({ name: "ZodError" });
-      await expect(AD.hideEvent(admin, e.id, { hidden: true, reason: "spam" })).resolves.toMatchObject({ changed: true });
-      await expect(AD.hideEvent(admin, e.id, { hidden: true, reason: "again" })).resolves.toMatchObject({ changed: false });
+      await expect(AD.hideEvent(admin, e.id, { hidden: true, clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ name: "ZodError" });
+      await expect(AD.hideEvent(admin, e.id, { hidden: true, reason: "organizer_revoked", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ name: "ZodError" });
+      await expect(AD.hideEvent(admin, e.id, { hidden: true, reason: "spam", clientOpId: crypto.randomUUID() })).resolves.toMatchObject({ changed: true });
+      await expect(AD.hideEvent(admin, e.id, { hidden: true, reason: "again", clientOpId: crypto.randomUUID() })).resolves.toMatchObject({ changed: false });
       await expect(EV.getPublicEventBySlug(e.slug)).rejects.toMatchObject({ status: 404 });
       expect((await EV.getMyEvent(orgA, e.id)).hiddenReason).toBe("spam");
-      await expect(AD.hideEvent(admin, e.id, { hidden: false })).resolves.toMatchObject({ changed: true });
+      await expect(AD.hideEvent(admin, e.id, { hidden: false, clientOpId: crypto.randomUUID() })).resolves.toMatchObject({ changed: true });
       await expect(EV.getPublicEventBySlug(e.slug)).resolves.toBeTruthy();
-      await expect(AD.hideEvent(admin, draft.id, { hidden: true, reason: "x" })).rejects.toMatchObject({ status: 409 }); // only published
+      await expect(AD.hideEvent(admin, draft.id, { hidden: true, reason: "x", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 409 }); // only published
     });
   });
 
@@ -240,7 +240,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       expect(list.events[0]).toMatchObject({ via: "staff", checkinOpen: true });
       expect(Object.keys(list.events[0]).sort()).toEqual(["checkinOpen", "checkinOpensAt", "endsAt", "id", "slug", "startsAt", "timeZone", "title", "venueName", "via"]);
       // Removal closes the door on the next request.
-      await ST.removeStaff(orgA, live.id, staffer.id);
+      await ST.removeStaff(orgA, live.id, staffer.id, op());
       await expect(AC.resolveDoorAccess(D, staffer, live.id)).rejects.toMatchObject({ status: 404 });
       expect((await ST.listDoorEvents(staffer)).events).toEqual([]);
     });
@@ -262,12 +262,12 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       const e = await publish(o, openDoorInput());
       const token = new URL((await ST.createInvite(o, e.id, op())).link).hash.slice(3);
       await ST.acceptInvite(s, { token });
-      await AD.hideEvent(admin, e.id, { hidden: true, reason: "abuse" });
+      await AD.hideEvent(admin, e.id, { hidden: true, reason: "abuse", clientOpId: crypto.randomUUID() });
       const hidden = await AC.resolveDoorAccess(D, s, e.id);
       expect(hidden.closed).toBe("hidden");
       expect(() => AC.assertDoorOpen(hidden)).toThrowError(expect.objectContaining({ status: 409, code: "checkin_closed" }));
       expect((await ST.listDoorEvents(s)).events).toEqual([]);
-      await AD.hideEvent(admin, e.id, { hidden: false });
+      await AD.hideEvent(admin, e.id, { hidden: false, clientOpId: crypto.randomUUID() });
       await expect(AC.resolveDoorAccess(D, s, e.id)).resolves.toMatchObject({ closed: null });
       // Revoking the organiser hides the event: staff see 409, the organiser 404.
       await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer", clientOpId: crypto.randomUUID() });
@@ -310,7 +310,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       const two = await publish(o, eventInput({ title: "Revoked two" }));
       const adminHid = await publish(o, eventInput({ title: "Admin hid" }));
       const dr = (await EV.createEvent(o, eventInput({ title: "Revoked draft" }))).event;
-      await AD.hideEvent(admin, adminHid.id, { hidden: true, reason: "spam" });
+      await AD.hideEvent(admin, adminHid.id, { hidden: true, reason: "spam", clientOpId: crypto.randomUUID() });
 
       const rev = await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer", clientOpId: crypto.randomUUID() });
       expect(rev).toMatchObject({ changed: true, previous: "organizer", role: "user", hidden: 2, unhidden: 0, replayed: false });
@@ -324,7 +324,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       expect((await EV.listPublicEvents({ limit: "100" })).events.map((e) => e.id)).not.toContain(one.id);
       // Can't write, and an admin can't unhide an organizer_revoked event while the owner is not an organiser.
       await expect(EV.updateEvent(o, one.id, { version: 2, title: "x" })).rejects.toMatchObject({ status: 403 });
-      await expect(AD.hideEvent(admin, one.id, { hidden: false })).rejects.toMatchObject({ status: 409 });
+      await expect(AD.hideEvent(admin, one.id, { hidden: false, clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 409 });
 
       const grant = await R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() });
       expect(grant).toMatchObject({ changed: true, hidden: 0, unhidden: 2 });
@@ -334,14 +334,37 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       expect((await EV.getMyEvent(o, adminHid.id)).hiddenReason).toBe("spam");
     });
 
+    it("a late retry of an unhide returns the first result and doesn't clear a newer hide by another admin; an op id can't be reused for another change", async () => {
+      const admin2 = await makeUser(sql, P, "admin3", "admin");
+      const e = await publish(orgA, eventInput({ title: "Hide ABA" }));
+      await AD.hideEvent(admin, e.id, { hidden: true, reason: "first", clientOpId: crypto.randomUUID() });
+      const unhideOp = crypto.randomUUID();
+      const first = await AD.hideEvent(admin, e.id, { hidden: false, clientOpId: unhideOp });
+      expect(first).toMatchObject({ hidden: false, changed: true, replayed: false });
+      await AD.hideEvent(admin2, e.id, { hidden: true, reason: "second, newer", clientOpId: crypto.randomUUID() });
+      const late = await AD.hideEvent(admin, e.id, { hidden: false, clientOpId: unhideOp });
+      expect(late).toMatchObject({ hidden: false, changed: true, replayed: true });
+      expect((await EV.getMyEvent(orgA, e.id)).hiddenReason).toBe("second, newer");
+      await expect(EV.getPublicEventBySlug(e.slug)).rejects.toMatchObject({ status: 404 });
+      await expect(AD.hideEvent(admin, e.id, { hidden: true, reason: "other", clientOpId: unhideOp })).rejects.toMatchObject({ status: 409, code: "op_id_reused" });
+      // The same op id used for a role change is a different request too.
+      await expect(R.setUserRole(admin, { userId: orgB.id, role: "user", from: "organizer", clientOpId: unhideOp })).rejects.toMatchObject({ status: 409, code: "op_id_reused" });
+      expect((await sql`select role from "user" where id = ${orgB.id}`)[0].role).toBe("organizer");
+      // Parallel duplicates of one hide make one change.
+      const op1 = crypto.randomUUID();
+      const par = await Promise.all(Array.from({ length: 5 }, () => AD.hideEvent(admin, e.id, { hidden: true, reason: "parallel", clientOpId: op1 })));
+      expect(par.filter((x) => !x.replayed)).toHaveLength(1);
+      expect(par.every((x) => x.hidden)).toBe(true);
+    });
+
     it("an admin hide over an organizer_revoked hide replaces the reason, so a re-grant doesn't unhide it", async () => {
       const o = await makeUser(sql, P, "overwrite", "organizer");
       const e = await publish(o, eventInput({ title: "Overwritten" }));
       await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer", clientOpId: crypto.randomUUID() });
-      await expect(AD.hideEvent(admin, e.id, { hidden: true, reason: "also abusive" })).resolves.toMatchObject({ changed: true });
+      await expect(AD.hideEvent(admin, e.id, { hidden: true, reason: "also abusive", clientOpId: crypto.randomUUID() })).resolves.toMatchObject({ changed: true });
       await R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() });
       await expect(EV.getPublicEventBySlug(e.slug)).rejects.toMatchObject({ status: 404 });
-      await expect(AD.hideEvent(admin, e.id, { hidden: false })).resolves.toMatchObject({ changed: true });
+      await expect(AD.hideEvent(admin, e.id, { hidden: false, clientOpId: crypto.randomUUID() })).resolves.toMatchObject({ changed: true });
       await expect(EV.getPublicEventBySlug(e.slug)).resolves.toBeTruthy();
     });
 
@@ -379,7 +402,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       const r = await Promise.all(Array.from({ length: 5 }, () => R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user", clientOpId })));
       expect(r.filter((x) => !x.replayed)).toHaveLength(1);
       expect(r.every((x) => x.changed && x.role === "organizer")).toBe(true);
-      const [{ n }] = await sql`select count(*)::int as n from role_change_op where admin_id = ${admin.id} and client_op_id = ${clientOpId}`;
+      const [{ n }] = await sql`select count(*)::int as n from op_ledger where actor_id = ${admin.id} and client_op_id = ${clientOpId}`;
       expect(n).toBe(1);
     });
 
@@ -423,7 +446,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
         () => TT.deleteTicketType(o, e.id, e.typeId),
         () => ST.createInvite(o, e.id, op()),
         () => ST.revokeInvite(o, e.id, crypto.randomUUID()),
-        () => ST.removeStaff(o, e.id, "someone"),
+        () => ST.removeStaff(o, e.id, "someone", op()),
       ];
       for (const [i, w] of organiserWrites.entries()) await expect(w(), `organiser write ${i}`).rejects.toMatchObject({ status: 429 });
 
@@ -434,7 +457,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
 
       await fillRate(sql, adm.id, 300);
       await expect(R.setUserRole(adm, { userId: target.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 429 });
-      await expect(AD.hideEvent(adm, e.id, { hidden: true, reason: "x" })).rejects.toMatchObject({ status: 429 });
+      await expect(AD.hideEvent(adm, e.id, { hidden: true, reason: "x", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 429 });
       expect((await sql`select role from "user" where id = ${target.id}`)[0].role).toBe("user");
 
       await fillRate(sql, o.id, 299);
