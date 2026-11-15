@@ -2,6 +2,7 @@ import "server-only";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies } from "better-auth/next-js";
+import { APIError } from "better-auth/api";
 import { admin } from "better-auth/plugins";
 import { db, schema } from "@/lib/db";
 import { refuseDemoIdentity } from "@/lib/demo-identity";
@@ -46,7 +47,13 @@ function createAuth() {
     databaseHooks: {
       user: {
         create: { before: async (data) => refuseDemoIdentity(data) },
-        update: { before: async (data) => refuseDemoIdentity(data) },
+        update: {
+          before: async (data) => {
+            // Defence in depth: no Better Auth path (self-service /update-user included) may write a role.
+            if ("role" in data && data.role !== undefined) throw new APIError("BAD_REQUEST", { message: "Roles can't be changed here." });
+            return refuseDemoIdentity(data);
+          },
+        },
       },
     },
     plugins: [

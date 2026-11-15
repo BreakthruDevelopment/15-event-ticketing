@@ -1,6 +1,6 @@
 import { DrizzleQueryError } from "drizzle-orm/errors";
 import { describe, expect, it, vi } from "vitest";
-import { ConflictError, NotFoundError, PayloadTooLargeError, TooManyRequestsError } from "@/lib/errors";
+import { CodedConflictError, ConflictError, NotFoundError, PayloadTooLargeError, TooManyRequestsError, VersionConflictError } from "@/lib/errors";
 import { errorInfo, errorResponse, readJson } from "@/lib/http";
 
 const post = (body: BodyInit | null, headers: Record<string, string> = {}) =>
@@ -93,5 +93,25 @@ describe("errorResponse logging (issue #16)", () => {
     }
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
+  });
+});
+
+describe("errorInfo for conflicts", () => {
+  it("sends the current row with a version conflict and a stable code with a coded one", () => {
+    expect(errorInfo(new VersionConflictError({ version: 3 }))).toEqual({
+      status: 409,
+      body: { error: expect.any(String), code: "version_conflict", current: { version: 3 } },
+    });
+    expect(errorInfo(new CodedConflictError("sold_out", "No seats left."))).toEqual({ status: 409, body: { error: "No seats left.", code: "sold_out" } });
+    expect(errorInfo(new ConflictError()).body).not.toHaveProperty("code");
+  });
+
+  it("maps a deadlock (40P01) or serialization failure (40001), even wrapped, to a 409 retry and never to a 500", () => {
+    const wrapped = (code: string) => new DrizzleQueryError("select 1", [], Object.assign(new Error("deadlock detected"), { code }));
+    for (const code of ["40P01", "40001"]) {
+      expect(errorInfo(wrapped(code))).toEqual({ status: 409, body: { error: "That was busy. Try again.", code: "retry" } });
+      expect(errorInfo(Object.assign(new Error("x"), { code })).status).toBe(409);
+    }
+    expect(errorInfo(wrapped("23505")).status).toBe(500); // other database errors stay opaque
   });
 });

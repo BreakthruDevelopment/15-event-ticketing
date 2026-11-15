@@ -1,6 +1,7 @@
 /**
- * Proves admins cannot impersonate users or set their passwords, while the admin
- * features the apps rely on (set-role, ban, remove-user) still work.
+ * Proves admins cannot impersonate users or set their passwords, and that roles change ONLY through
+ * `setUserRole` (the logic behind `POST /api/admin/roles`): Better Auth's set-role, create-user, update-user and
+ * remove-user answer 403/404 even for an admin and change nothing. List, ban and unban still work.
  * Runs against a real Postgres when TEST_DATABASE_URL is set.
  * Better Auth's origin check is off under NODE_ENV=test, so requests need no Origin header.
  */
@@ -19,6 +20,8 @@ describe.skipIf(!url)("admin permissions (Better Auth + Postgres)", () => {
   let adminCookie: string;
   let userCookie: string;
   let victimId: string;
+  let adminUserId: string;
+  let plainId: string;
   const email = (n: string) => `ap-${n}@test.local`;
 
   async function call(path: string, body: unknown, cookie?: string) {
@@ -63,8 +66,9 @@ describe.skipIf(!url)("admin permissions (Better Auth + Postgres)", () => {
     authApi = auth().api as unknown as typeof authApi;
 
     const adminId = await signUp("admin");
+    adminUserId = adminId;
     victimId = await signUp("victim");
-    await signUp("plain");
+    plainId = await signUp("plain");
     await sql`update "user" set role = 'admin' where id = ${adminId}`;
 
     adminCookie = (await signIn("admin"))!;
@@ -157,19 +161,83 @@ describe.skipIf(!url)("admin permissions (Better Auth + Postgres)", () => {
   });
 
   it("does not let a plain user use admin endpoints", async () => {
-    const res = await call("/admin/set-role", { userId: victimId, role: "admin" }, userCookie);
+    // (set-role is disabled outright now, so a 404 would prove nothing: ban-user is still enabled and must be 403.)
+    const res = await call("/admin/ban-user", { userId: victimId }, userCookie);
     expect(res.status).toBe(403);
-    const [row] = await sql`select role from "user" where id = ${victimId}`;
-    expect(row.role).not.toBe("admin");
+    const [row] = await sql`select banned from "user" where id = ${victimId}`;
+    expect(row.banned).not.toBe(true);
   });
 
-  it("still lets an admin promote and demote a user", async () => {
-    let res = await call("/admin/set-role", { userId: victimId, role: "admin" }, adminCookie);
-    expect(res.status).toBe(200);
-    expect((await sql`select role from "user" where id = ${victimId}`)[0].role).toBe("admin");
-    res = await call("/admin/set-role", { userId: victimId, role: "user" }, adminCookie);
-    expect(res.status).toBe(200);
-    expect((await sql`select role from "user" where id = ${victimId}`)[0].role).toBe("user");
+  const roleOf = async (id: string) => (await sql`select role from "user" where id = ${id}`)[0].role as string;
+
+  it("refuses set-role, create-user, update-user and remove-user over HTTP for an admin, and changes nothing", async () => {
+    const users = async () => (await sql`select count(*)::int as n from "user" where email like 'ap-%@test.local'`)[0].n as number;
+    const before = await users();
+    const attempts: [string, unknown][] = [
+      ["/admin/set-role", { userId: victimId, role: "organizer" }],
+      ["/admin/set-role", { userId: victimId, role: "admin" }],
+      ["/admin/create-user", { email: email("created"), password: PASSWORD, name: "Created", role: "admin" }],
+      ["/admin/update-user", { userId: victimId, data: { role: "organizer", name: "Renamed" } }],
+      ["/admin/remove-user", { userId: victimId }],
+    ];
+    for (const [path, body] of attempts) {
+      const res = await call(path, body, adminCookie);
+      expect([403, 404], path).toContain(res.status);
+    }
+    expect(await roleOf(victimId)).toBe("user");
+    expect((await sql`select name from "user" where id = ${victimId}`)[0].name).toBe("victim");
+    expect(await users()).toBe(before);
+  });
+
+  it("refuses the same four calls even if the HTTP block were bypassed (the admin role has no permission)", async () => {
+    const headers = new Headers({ cookie: adminCookie });
+    const calls: (() => Promise<unknown>)[] = [
+      () => authApi.setRole({ headers, body: { userId: victimId, role: "organizer" } }),
+      () => authApi.createUser({ headers, body: { email: email("created2"), password: PASSWORD, name: "C", role: "admin" } }),
+      () => authApi.adminUpdateUser({ headers, body: { userId: victimId, data: { role: "organizer" } } }),
+      () => authApi.removeUser({ headers, body: { userId: victimId } }),
+    ];
+    for (const c of calls) await expect(c()).rejects.toMatchObject({ statusCode: 403 });
+    expect(await roleOf(victimId)).toBe("user");
+    expect(await sql`select id from "user" where id = ${victimId}`).toHaveLength(1);
+  });
+
+  it("promotes and demotes through setUserRole (POST /api/admin/roles), for admins only", async () => {
+    const { setUserRole } = await import("@/lib/auth/roles");
+    const admin = { id: adminUserId, role: "admin" as const };
+    await expect(setUserRole(admin, { userId: victimId, role: "organizer", from: "user" })).resolves.toMatchObject({ changed: true, role: "organizer", previous: "user" });
+    expect(await roleOf(victimId)).toBe("organizer");
+    await expect(setUserRole(admin, { userId: victimId, role: "organizer", from: "organizer" })).resolves.toMatchObject({ changed: false });
+    await expect(setUserRole(admin, { userId: victimId, role: "user", from: "organizer" })).resolves.toMatchObject({ changed: true, role: "user" });
+    expect(await roleOf(victimId)).toBe("user");
+    // Not for attendees, organisers or signed-out callers; not to `admin`; not for an admin target; not from a stale view.
+    const grant = { userId: victimId, role: "organizer", from: "user" };
+    await expect(setUserRole({ id: victimId, role: "user" }, grant)).rejects.toMatchObject({ status: 403 });
+    await expect(setUserRole({ id: victimId, role: "organizer" }, grant)).rejects.toMatchObject({ status: 403 });
+    await expect(setUserRole(null, grant)).rejects.toMatchObject({ status: 401 });
+    await expect(setUserRole(admin, { ...grant, role: "admin" })).rejects.toMatchObject({ name: "ZodError" });
+    await expect(setUserRole(admin, { userId: adminUserId, role: "user", from: "admin" })).rejects.toMatchObject({ status: 409 });
+    await expect(setUserRole(admin, { userId: "ap-nobody", role: "organizer", from: "user" })).rejects.toMatchObject({ status: 404 });
+    await expect(setUserRole(admin, { userId: victimId, role: "organizer", from: "organizer" })).rejects.toMatchObject({ status: 409, current: { userId: victimId, role: "user" } });
+    expect(await roleOf(victimId)).toBe("user");
+    expect(await roleOf(adminUserId)).toBe("admin");
+  });
+
+  it("sign-up can't set a role: posting `role` still makes an attendee", async () => {
+    for (const [name, role] of [["escalate1", "admin"], ["escalate2", "organizer"]]) {
+      const res = await call("/sign-up/email", { name, email: email(name), password: PASSWORD, role });
+      const [row] = await sql`select role from "user" where email = ${email(name)}`;
+      if (res.status === 200) expect(row.role).toBe("user");
+      else expect(row).toBeUndefined();
+    }
+  });
+
+  it("a signed-in user can't give themselves a role through /update-user", async () => {
+    const res = await call("/update-user", { name: "Plain", role: "organizer" }, userCookie);
+    expect(res.status).not.toBe(200);
+    expect(await roleOf(plainId)).toBe("user");
+    // ... while a harmless profile change still works.
+    expect((await call("/update-user", { name: "Plain Renamed" }, userCookie)).status).toBe(200);
   });
 
   it("still lets an admin list users, ban and unban", async () => {
@@ -186,9 +254,9 @@ describe.skipIf(!url)("admin permissions (Better Auth + Postgres)", () => {
     expect(res.status).toBe(200);
   });
 
-  it("still lets an admin remove a user", async () => {
+  it("no longer lets an admin remove a user (account deletion is out of scope)", async () => {
     const res = await call("/admin/remove-user", { userId: victimId }, adminCookie);
-    expect(res.status).toBe(200);
-    expect(await sql`select id from "user" where id = ${victimId}`).toHaveLength(0);
+    expect([403, 404]).toContain(res.status);
+    expect(await sql`select id from "user" where id = ${victimId}`).toHaveLength(1);
   });
 });
