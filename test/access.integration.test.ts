@@ -271,6 +271,32 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
     });
   });
 
+  describe("accept invite: delayed retry after removal, and the door read limit", () => {
+    const tokenOf = (link: string) => new URL(link).hash.slice("#t=".length);
+
+    it("an already-staff accept is recorded: after removal a retry doesn't consume the invite or restore access", async () => {
+      const u = await makeUser(sql, P, "noopretry", "user");
+      const e = await publish(orgA, eventInput({ title: "Noop retry" }));
+      const first = await ST.createInvite(orgA, e.id, op());
+      await ST.acceptInvite(u, { token: tokenOf(first.link) });
+      const second = await ST.createInvite(orgA, e.id, op());
+      const t2 = tokenOf(second.link);
+      await expect(ST.acceptInvite(u, { token: t2 })).resolves.toMatchObject({ replayed: true });
+      await ST.removeStaff(orgA, e.id, u.id, op());
+      await expect(ST.acceptInvite(u, { token: t2 })).resolves.toMatchObject({ replayed: true });
+      await expect(AC.resolveDoorAccess(D, u, e.id)).rejects.toMatchObject({ status: 404 });
+      const [row] = await sql`select used_at from staff_invite where id = ${second.id}`;
+      expect(row.used_at).toBeNull();
+    });
+
+    it("listing door events spends the per-user door_read allowance (429 over 600/hour), even with no events", async () => {
+      const u = await makeUser(sql, P, "doorread", "user");
+      await fillRate(sql, u.id, 599, "door_read");
+      await expect(ST.listDoorEvents(u)).resolves.toEqual({ events: [] });
+      await expect(ST.listDoorEvents(u)).rejects.toMatchObject({ status: 429 });
+    });
+  });
+
   describe("door staff (per event, not a role)", () => {
     it("staff of event A can use A's door and nothing of event B's; a stranger gets 404 on both", async () => {
       const inv = await ST.createInvite(orgA, live.id, op());

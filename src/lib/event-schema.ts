@@ -13,6 +13,7 @@ export const LIMITS = {
   capacityPerType: 5_000,
   capacityPerEvent: 10_000,
   writesPerHour: 300,
+  doorReadsPerHour: 600,
   staffPerEvent: 20,
   openInvitesPerEvent: 10,
   inviteTtlHours: 72,
@@ -24,6 +25,7 @@ export const LIMITS = {
   checkinTailHours: 6,
 } as const;
 
+export const TOO_MANY_READS = "Too many requests. Try again in a few minutes.";
 export const TOO_MANY_WRITES = "Too many changes this hour. Try again later.";
 
 const HOUR = 3_600_000;

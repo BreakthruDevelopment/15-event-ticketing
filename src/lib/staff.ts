@@ -6,12 +6,13 @@ import { type Actor, toRole } from "@/lib/auth/rbac";
 import { db, schema } from "@/lib/db";
 import { env } from "@/lib/env";
 import { CodedConflictError, NotFoundError } from "@/lib/errors";
-import { LIMITS, idParam, inviteTokenInput, newInviteInput, removeStaffInput } from "@/lib/event-schema";
+import { LIMITS, TOO_MANY_READS, idParam, inviteTokenInput, newInviteInput, removeStaffInput } from "@/lib/event-schema";
 import { lockOwnEvent } from "@/lib/events";
 import { log } from "@/lib/log";
 import { withOp } from "@/lib/op-ledger";
 import { idText } from "@/lib/text";
 import { deriveKey } from "@/lib/tickets/keys";
+import { consumeRate } from "@/lib/usage";
 import { writeTx } from "@/lib/write-tx";
 
 /**
@@ -29,6 +30,15 @@ import { writeTx } from "@/lib/write-tx";
 const S = schema.eventStaff;
 const I = schema.staffInvite;
 const E = schema.event;
+
+/** A stable UUID from a string (first 16 bytes of its sha256, version and variant bits set). */
+function uuidFrom(text: string): string {
+  const b = createHash("sha256").update(text).digest().subarray(0, 16);
+  b[6] = (b[6] & 0x0f) | 0x50;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = b.toString("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
 
 const digest = (token: string) => createHash("sha256").update(token).digest();
 
@@ -164,8 +174,18 @@ export async function acceptInvite(actor: Actor | null, input: unknown) {
     const [ev] = await tx.select({ id: E.id, title: E.title, organizerId: E.organizerId, status: E.status, hiddenAt: E.hiddenAt }).from(E).where(eq(E.id, peek.eventId)).for("update");
     if (!ev || ev.organizerId === actor.id || ev.status === "cancelled" || ev.hiddenAt) throw noInvite();
     // Already door staff here: answer ok and leave the invite open for someone else (no cap check, nothing burned).
-    const [already] = await tx.select({ userId: S.userId }).from(S).where(and(eq(S.eventId, ev.id), eq(S.userId, actor.id)));
-    if (already) return { eventId: ev.id, title: ev.title, replayed: true };
+    // The no-op is recorded in `op_ledger` (keyed by this token), so a delayed retry after the organiser removed them
+    // answers the same and can't consume the invite and restore access.
+    const noopOp = uuidFrom(`${d.toString("hex")}:${actor.id}`);
+    const [noop] = await tx.select({ id: schema.opLedger.clientOpId }).from(schema.opLedger).where(and(eq(schema.opLedger.actorId, actor.id), eq(schema.opLedger.clientOpId, noopOp)));
+    if (noop) return { eventId: ev.id, title: ev.title, replayed: true };
+    // Only while the invite is still open: a used invite takes the replay path below.
+    const [stillOpen] = await tx.select({ id: I.id }).from(I).where(and(eq(I.id, peek.id), openInvite()));
+    const [already] = stillOpen ? await tx.select({ userId: S.userId }).from(S).where(and(eq(S.eventId, ev.id), eq(S.userId, actor.id))) : [];
+    if (already) {
+      await tx.insert(schema.opLedger).values({ actorId: actor.id, clientOpId: noopOp, kind: "invite-accept-noop", payloadHash: d.toString("hex"), result: { eventId: ev.id } }).onConflictDoNothing();
+      return { eventId: ev.id, title: ev.title, replayed: true };
+    }
     const [used] = await tx
       .update(I)
       .set({ usedBy: actor.id, usedAt: new Date() })
@@ -193,6 +213,8 @@ export async function acceptInvite(actor: Actor | null, input: unknown) {
  */
 export async function listDoorEvents(actor: Actor | null) {
   assertCan(actor, "door:use");
+  // Signed-in reads spend the per-user `door_read` allowance (600/hour), also for users with no events at all.
+  await db().transaction((tx) => consumeRate(tx, actor.id, "door_read", LIMITS.doorReadsPerHour, TOO_MANY_READS));
   const [u] = await db().select({ role: schema.user.role, banned: schema.user.banned }).from(schema.user).where(eq(schema.user.id, actor.id));
   if (!u || u.banned) return { events: [] };
   const isOrganizer = toRole(u.role) === "organizer";
