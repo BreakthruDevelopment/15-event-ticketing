@@ -117,7 +117,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
         () => ST.removeStaff(attendee, live.id, staffer.id),
         () => AD.adminStats(attendee),
         () => AD.hideEvent(attendee, live.id, { hidden: true, reason: "x" }),
-        () => R.setUserRole(attendee, { userId: attendee.id, role: "organizer", from: "user" }),
+        () => R.setUserRole(attendee, { userId: attendee.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() }),
       ];
       for (const [i, call] of calls.entries()) await expect(call(), `call ${i}`).rejects.toMatchObject({ status: 403 });
       const [{ role }] = await sql`select role from "user" where id = ${attendee.id}`;
@@ -163,7 +163,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
     it("is blocked from admin functions (403)", async () => {
       await expect(AD.adminStats(orgA)).rejects.toMatchObject({ status: 403 });
       await expect(AD.hideEvent(orgA, other.id, { hidden: true, reason: "x" })).rejects.toMatchObject({ status: 403 });
-      await expect(R.setUserRole(orgA, { userId: orgB.id, role: "user", from: "organizer" })).rejects.toMatchObject({ status: 403 });
+      await expect(R.setUserRole(orgA, { userId: orgB.id, role: "user", from: "organizer", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 403 });
     });
 
     it("loses write access the moment the role is revoked, even with a session that still says organizer (403)", async () => {
@@ -270,7 +270,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       await AD.hideEvent(admin, e.id, { hidden: false });
       await expect(AC.resolveDoorAccess(D, s, e.id)).resolves.toMatchObject({ closed: null });
       // Revoking the organiser hides the event: staff see 409, the organiser 404.
-      await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer" });
+      await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer", clientOpId: crypto.randomUUID() });
       expect((await AC.resolveDoorAccess(D, s, e.id)).closed).toBe("hidden");
       await expect(AC.resolveDoorAccess(D, { id: o.id, role: "user" }, e.id)).rejects.toMatchObject({ status: 404 });
     });
@@ -312,7 +312,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       const dr = (await EV.createEvent(o, eventInput({ title: "Revoked draft" }))).event;
       await AD.hideEvent(admin, adminHid.id, { hidden: true, reason: "spam" });
 
-      const rev = await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer" });
+      const rev = await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer", clientOpId: crypto.randomUUID() });
       expect(rev).toMatchObject({ changed: true, previous: "organizer", role: "user", hidden: 2, unhidden: 0, replayed: false });
       const rows = await sql`select id, hidden_reason from event where organizer_id = ${o.id}`;
       const reason = (id: string) => rows.find((r) => r.id === id)?.hidden_reason;
@@ -326,7 +326,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       await expect(EV.updateEvent(o, one.id, { version: 2, title: "x" })).rejects.toMatchObject({ status: 403 });
       await expect(AD.hideEvent(admin, one.id, { hidden: false })).rejects.toMatchObject({ status: 409 });
 
-      const grant = await R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user" });
+      const grant = await R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() });
       expect(grant).toMatchObject({ changed: true, hidden: 0, unhidden: 2 });
       await expect(EV.getPublicEventBySlug(one.slug)).resolves.toBeTruthy();
       await expect(EV.getPublicEventBySlug(two.slug)).resolves.toBeTruthy();
@@ -337,9 +337,9 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
     it("an admin hide over an organizer_revoked hide replaces the reason, so a re-grant doesn't unhide it", async () => {
       const o = await makeUser(sql, P, "overwrite", "organizer");
       const e = await publish(o, eventInput({ title: "Overwritten" }));
-      await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer" });
+      await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer", clientOpId: crypto.randomUUID() });
       await expect(AD.hideEvent(admin, e.id, { hidden: true, reason: "also abusive" })).resolves.toMatchObject({ changed: true });
-      await R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user" });
+      await R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() });
       await expect(EV.getPublicEventBySlug(e.slug)).rejects.toMatchObject({ status: 404 });
       await expect(AD.hideEvent(admin, e.id, { hidden: false })).resolves.toMatchObject({ changed: true });
       await expect(EV.getPublicEventBySlug(e.slug)).resolves.toBeTruthy();
@@ -347,13 +347,14 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
 
     it("compare-and-set: a stale `from` is a 409 with the current role and changes nothing", async () => {
       const o = await makeUser(sql, P, "cas", "user");
-      const err = await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer" }).catch((e) => e);
+      const err = await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer", clientOpId: crypto.randomUUID() }).catch((e) => e);
       expect(err).toMatchObject({ status: 409, current: { userId: o.id, role: "user" } });
-      await R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user" });
-      const stale = await R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user" }).catch((e) => e);
+      await R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() });
+      const stale = await R.setUserRole(admin, { userId: o.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() }).catch((e) => e);
       expect(stale).toMatchObject({ status: 409, current: { role: "organizer" } });
-      await expect(R.setUserRole(admin, { userId: o.id, role: "organizer", from: "organizer" })).resolves.toMatchObject({ changed: false });
-      await expect(R.setUserRole(admin, { userId: o.id, role: "user" })).rejects.toMatchObject({ name: "ZodError" }); // `from` is required
+      await expect(R.setUserRole(admin, { userId: o.id, role: "organizer", from: "organizer", clientOpId: crypto.randomUUID() })).resolves.toMatchObject({ changed: false });
+      await expect(R.setUserRole(admin, { userId: o.id, role: "user", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ name: "ZodError" }); // `from` is required
+      await expect(R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer" })).rejects.toMatchObject({ name: "ZodError" }); // so is `clientOpId`
     });
 
     it("clientOpId replays the first result, even after the role moved; another request under the same id is a 409", async () => {
@@ -362,7 +363,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       const body = { userId: o.id, role: "organizer", from: "user", clientOpId } as const;
       const first = await R.setUserRole(admin, body);
       expect(first).toMatchObject({ changed: true, replayed: false });
-      await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer" }); // someone moves it back
+      await R.setUserRole(admin, { userId: o.id, role: "user", from: "organizer", clientOpId: crypto.randomUUID() }); // someone moves it back
       const again = await R.setUserRole(admin, body);
       expect(again).toMatchObject({ changed: true, role: "organizer", previous: "user", replayed: true });
       const [{ role }] = await sql`select role from "user" where id = ${o.id}`;
@@ -383,19 +384,19 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
     });
 
     it("an admin's role can't be changed, nobody is promoted to admin, and unknown users are a 404", async () => {
-      await expect(R.setUserRole(admin, { userId: admin.id, role: "user", from: "admin" })).rejects.toMatchObject({ status: 409 });
-      await expect(R.setUserRole(admin, { userId: attendee.id, role: "admin", from: "user" })).rejects.toMatchObject({ name: "ZodError" });
-      await expect(R.setUserRole(admin, { userId: "ac-nobody", role: "organizer", from: "user" })).rejects.toMatchObject({ status: 404 });
+      await expect(R.setUserRole(admin, { userId: admin.id, role: "user", from: "admin", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 409 });
+      await expect(R.setUserRole(admin, { userId: attendee.id, role: "admin", from: "user", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ name: "ZodError" });
+      await expect(R.setUserRole(admin, { userId: "ac-nobody", role: "organizer", from: "user", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 404 });
     });
 
     it("two admins changing each other's targets in parallel don't deadlock", async () => {
       const admin2 = await makeUser(sql, P, "admin2", "admin");
       const targets = await Promise.all(Array.from({ length: 4 }, (_, i) => makeUser(sql, P, `par${i}`, "user")));
       const ops = targets.flatMap((t) => [
-        R.setUserRole(admin, { userId: t.id, role: "organizer", from: "user" }),
-        R.setUserRole(admin2, { userId: t.id, role: "organizer", from: "user" }),
-        R.setUserRole(admin, { userId: admin2.id, role: "user", from: "admin" }),
-        R.setUserRole(admin2, { userId: admin.id, role: "user", from: "admin" }),
+        R.setUserRole(admin, { userId: t.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() }),
+        R.setUserRole(admin2, { userId: t.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() }),
+        R.setUserRole(admin, { userId: admin2.id, role: "user", from: "admin", clientOpId: crypto.randomUUID() }),
+        R.setUserRole(admin2, { userId: admin.id, role: "user", from: "admin", clientOpId: crypto.randomUUID() }),
       ]);
       const results = await Promise.allSettled(ops);
       for (const r of results) if (r.status === "rejected") expect(typeof (r.reason as { status?: number }).status).toBe("number");
@@ -432,7 +433,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       expect(used).toBe(0);
 
       await fillRate(sql, adm.id, 300);
-      await expect(R.setUserRole(adm, { userId: target.id, role: "organizer", from: "user" })).rejects.toMatchObject({ status: 429 });
+      await expect(R.setUserRole(adm, { userId: target.id, role: "organizer", from: "user", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 429 });
       await expect(AD.hideEvent(adm, e.id, { hidden: true, reason: "x" })).rejects.toMatchObject({ status: 429 });
       expect((await sql`select role from "user" where id = ${target.id}`)[0].role).toBe("user");
 

@@ -264,7 +264,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
       for (const bad of ["abc" + nul, nul, ""]) {
         expect((await EV.getPublicEventBySlug(bad).catch((x) => x)).name, JSON.stringify(bad)).toBe("ZodError");
         expect((await AD.hideEvent(admin, bad, { hidden: false }).catch((x) => x)).name).toBe("ZodError");
-        expect((await R.setUserRole(admin, { userId: bad, role: "user", from: "user" }).catch((x) => x)).name).toBe("ZodError");
+        expect((await R.setUserRole(admin, { userId: bad, role: "user", from: "user", clientOpId: crypto.randomUUID() }).catch((x) => x)).name).toBe("ZodError");
         expect((await ST.acceptInvite(attendee, { token: bad }).catch((x) => x)).name).toBe(bad === "" ? "ZodError" : "ZodError");
       }
       await expect(EV.getPublicEventBySlug("no-such-event-slug")).rejects.toMatchObject({ status: 404 });
@@ -494,7 +494,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
           ST.createInvite(racer, b.id, op()),
           EV.createEvent(racer, eventInput({ title: `Racing ${round}` })),
           AD.hideEvent(admin, a.id, { hidden: round % 2 === 0, reason: "race" }),
-          R.setUserRole(admin, { userId: racer.id, role: round % 2 === 0 ? "user" : "organizer", from: round % 2 === 0 ? "organizer" : "user" }),
+          R.setUserRole(admin, { userId: racer.id, role: round % 2 === 0 ? "user" : "organizer", from: round % 2 === 0 ? "organizer" : "user", clientOpId: crypto.randomUUID() }),
         );
       }
       ops.push(EV.deleteEvent(racer, b.id), EV.deleteEvent(racer, a.id));

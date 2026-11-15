@@ -51,6 +51,7 @@ describe.skipIf(!url)("admin permissions (Better Auth + Postgres)", () => {
   }
 
   async function cleanup() {
+    await sql`delete from role_change_op where admin_id in (select id from "user" where email like 'ap-%@test.local')`;
     await sql`delete from "user" where email like 'ap-%@test.local'`;
   }
 
@@ -205,20 +206,20 @@ describe.skipIf(!url)("admin permissions (Better Auth + Postgres)", () => {
   it("promotes and demotes through setUserRole (POST /api/admin/roles), for admins only", async () => {
     const { setUserRole } = await import("@/lib/auth/roles");
     const admin = { id: adminUserId, role: "admin" as const };
-    await expect(setUserRole(admin, { userId: victimId, role: "organizer", from: "user" })).resolves.toMatchObject({ changed: true, role: "organizer", previous: "user" });
+    await expect(setUserRole(admin, { userId: victimId, role: "organizer", from: "user", clientOpId: crypto.randomUUID() })).resolves.toMatchObject({ changed: true, role: "organizer", previous: "user" });
     expect(await roleOf(victimId)).toBe("organizer");
-    await expect(setUserRole(admin, { userId: victimId, role: "organizer", from: "organizer" })).resolves.toMatchObject({ changed: false });
-    await expect(setUserRole(admin, { userId: victimId, role: "user", from: "organizer" })).resolves.toMatchObject({ changed: true, role: "user" });
+    await expect(setUserRole(admin, { userId: victimId, role: "organizer", from: "organizer", clientOpId: crypto.randomUUID() })).resolves.toMatchObject({ changed: false });
+    await expect(setUserRole(admin, { userId: victimId, role: "user", from: "organizer", clientOpId: crypto.randomUUID() })).resolves.toMatchObject({ changed: true, role: "user" });
     expect(await roleOf(victimId)).toBe("user");
     // Not for attendees, organisers or signed-out callers; not to `admin`; not for an admin target; not from a stale view.
-    const grant = { userId: victimId, role: "organizer", from: "user" };
+    const grant = { userId: victimId, role: "organizer", from: "user", clientOpId: crypto.randomUUID() };
     await expect(setUserRole({ id: victimId, role: "user" }, grant)).rejects.toMatchObject({ status: 403 });
     await expect(setUserRole({ id: victimId, role: "organizer" }, grant)).rejects.toMatchObject({ status: 403 });
     await expect(setUserRole(null, grant)).rejects.toMatchObject({ status: 401 });
     await expect(setUserRole(admin, { ...grant, role: "admin" })).rejects.toMatchObject({ name: "ZodError" });
-    await expect(setUserRole(admin, { userId: adminUserId, role: "user", from: "admin" })).rejects.toMatchObject({ status: 409 });
-    await expect(setUserRole(admin, { userId: "ap-nobody", role: "organizer", from: "user" })).rejects.toMatchObject({ status: 404 });
-    await expect(setUserRole(admin, { userId: victimId, role: "organizer", from: "organizer" })).rejects.toMatchObject({ status: 409, current: { userId: victimId, role: "user" } });
+    await expect(setUserRole(admin, { userId: adminUserId, role: "user", from: "admin", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 409 });
+    await expect(setUserRole(admin, { userId: "ap-nobody", role: "organizer", from: "user", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 404 });
+    await expect(setUserRole(admin, { userId: victimId, role: "organizer", from: "organizer", clientOpId: crypto.randomUUID() })).rejects.toMatchObject({ status: 409, current: { userId: victimId, role: "user" } });
     expect(await roleOf(victimId)).toBe("user");
     expect(await roleOf(adminUserId)).toBe("admin");
   });

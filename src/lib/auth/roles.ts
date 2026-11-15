@@ -25,13 +25,14 @@ const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
  * The only way a role changes (`POST /api/admin/roles`): Better Auth's own set-role, create-user, update-user and
  * remove-user are disabled, so nothing can skip the hide/unhide below.
  *
- * Body `{ userId, role: "user" | "organizer", from, clientOpId? }`.
+ * Body `{ userId, role: "user" | "organizer", from, clientOpId }`. All four are required.
  *  - `from` is the role the admin saw when they decided. It is applied only if the user still has that role;
  *    otherwise 409 `version_conflict` with `current: { userId, role }`, so a stale tab or a retry can't silently undo
  *    someone else's change.
- *  - `clientOpId` is a replay ledger (`role_change_op`, unique per admin): an exact retry returns the first result with
- *    `replayed: true` and changes nothing, even after the role moved since; the same id with a different request is 409
- *    `op_id_reused`. The ledger row and the result commit with the change, so a parallel duplicate waits for the first.
+ *  - `clientOpId` is a replay ledger (`role_change_op`, unique per admin). It is required because `from` alone can't stop
+ *    a delayed retry of "grant" after a later "revoke" (the `from` check would pass again). An exact retry returns the
+ *    first result with `replayed: true` and changes nothing, even after the role moved since; the same id with a
+ *    different request is 409 `op_id_reused`. The ledger row and the result commit with the change, so a parallel duplicate waits for the first.
  *
  * Revoking `organizer` hides that organiser's `published` events that aren't already hidden
  * (`hidden_reason = 'organizer_revoked'`), so an admin's own hide and its reason are never overwritten. Granting
@@ -46,22 +47,20 @@ export async function setUserRole(actor: Actor | null, input: unknown): Promise<
   const data = roleInput.parse(input);
   const hash = sha256(`${data.userId}\n${data.role}\n${data.from}`);
   const out = await writeTx(actor, "admin:roles", async (tx) => {
-    if (data.clientOpId) {
-      // The unique key makes a parallel duplicate wait for the first transaction, then see its stored result.
-      const [mine] = await tx
-        .insert(schema.roleChangeOp)
-        .values({ adminId: actor.id, clientOpId: data.clientOpId, payloadHash: hash })
-        .onConflictDoNothing()
-        .returning({ id: schema.roleChangeOp.clientOpId });
-      if (!mine) {
-        const [first] = await tx
-          .select()
-          .from(schema.roleChangeOp)
-          .where(and(eq(schema.roleChangeOp.adminId, actor.id), eq(schema.roleChangeOp.clientOpId, data.clientOpId)));
-        if (first && first.payloadHash !== hash) throw new CodedConflictError("op_id_reused", "That request id was already used for a different change.");
-        if (first?.result) return { replayed: true as const, result: first.result as unknown as RoleChange };
-        throw new CodedConflictError("retry", "That role change is still running. Try again.");
-      }
+    // The unique key makes a parallel duplicate wait for the first transaction, then see its stored result.
+    const [mine] = await tx
+      .insert(schema.roleChangeOp)
+      .values({ adminId: actor.id, clientOpId: data.clientOpId, payloadHash: hash })
+      .onConflictDoNothing()
+      .returning({ id: schema.roleChangeOp.clientOpId });
+    if (!mine) {
+      const [first] = await tx
+        .select()
+        .from(schema.roleChangeOp)
+        .where(and(eq(schema.roleChangeOp.adminId, actor.id), eq(schema.roleChangeOp.clientOpId, data.clientOpId)));
+      if (first && first.payloadHash !== hash) throw new CodedConflictError("op_id_reused", "That request id was already used for a different change.");
+      if (first?.result) return { replayed: true as const, result: first.result as unknown as RoleChange };
+      throw new CodedConflictError("retry", "That role change is still running. Try again.");
     }
 
     // An admin's role never changes in this app, so a plain read can refuse an admin target without locking its row
@@ -97,12 +96,10 @@ export async function setUserRole(actor: Actor | null, input: unknown): Promise<
         result.unhidden = rows.length;
       }
     }
-    if (data.clientOpId) {
-      await tx
-        .update(schema.roleChangeOp)
-        .set({ result })
-        .where(and(eq(schema.roleChangeOp.adminId, actor.id), eq(schema.roleChangeOp.clientOpId, data.clientOpId)));
-    }
+    await tx
+      .update(schema.roleChangeOp)
+      .set({ result })
+      .where(and(eq(schema.roleChangeOp.adminId, actor.id), eq(schema.roleChangeOp.clientOpId, data.clientOpId)));
     return { replayed: false as const, result };
   });
   if (!out.replayed && out.result.changed) {

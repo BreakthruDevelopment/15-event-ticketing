@@ -223,7 +223,9 @@ if [ -n "${SMOKE_ADMIN_EMAIL:-}" ] && [ -n "${SMOKE_ADMIN_PASSWORD:-}" ]; then
     code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_ADM" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"userId":"x","role":"admin"}' "$BASE_URL/api/auth$path")
     case "$code" in 403|404) ;; *) fail "$path should be 403 or 404 for an admin, got $code" ;; esac
   done
-  req "$JAR_ADM" POST /api/admin/roles '{"userId":"smoke-nobody","role":"organizer","from":"user"}'; expect 404 "granting to an unknown user"
+  ROLE_OP="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)"
+req "$JAR_ADM" POST /api/admin/roles '{"userId":"smoke-nobody","role":"organizer","from":"user"}'; expect 400 "a role change without a client op id"
+req "$JAR_ADM" POST /api/admin/roles "{\"userId\":\"smoke-nobody\",\"role\":\"organizer\",\"from\":\"user\",\"clientOpId\":\"$ROLE_OP\"}"; expect 404 "granting to an unknown user"
   pass "admin sees counts, hides and unhides an event, and Better Auth's role and account writes are refused"
 else
   echo "skip - admin steps (SMOKE_ADMIN_EMAIL / SMOKE_ADMIN_PASSWORD not set)"

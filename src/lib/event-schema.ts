@@ -164,8 +164,11 @@ export const roleInput = z.strictObject({
   role: z.enum(["user", "organizer"]),
   /** The role the admin saw when they decided. Applied only if the user still has it; otherwise 409 with the current role. */
   from: z.enum(["user", "organizer", "admin"]),
-  /** One id per click (`opFor`): an exact retry returns the first result, even after someone else changed the role since. */
-  clientOpId: clientOpId.optional(),
+  /**
+   * One id per click (`opFor`), required: an exact retry returns the first result, even after someone else changed the
+   * role since. Without it a delayed retry of "grant" after a later "revoke" would pass the `from` check again.
+   */
+  clientOpId,
 });
 
 export const idParam = uuidText;

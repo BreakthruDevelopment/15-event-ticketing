@@ -89,9 +89,10 @@ describe("event schemas", () => {
     expect(hideInput.safeParse({ hidden: true, reason: "organizer_revoked" }).success).toBe(false);
     expect(hideInput.safeParse({ hidden: true, reason: "spam" }).success).toBe(true);
     expect(hideInput.safeParse({ hidden: false }).success).toBe(true);
-    const r = { userId: "u", role: "organizer", from: "user" };
+    const r = { userId: "u", role: "organizer", from: "user", clientOpId: crypto.randomUUID() };
     expect(roleInput.safeParse(r).success).toBe(true);
-    expect(roleInput.safeParse({ userId: "u", role: "organizer" }).success).toBe(false); // `from` is required
+    expect(roleInput.safeParse({ userId: "u", role: "organizer", clientOpId: r.clientOpId }).success).toBe(false); // `from` is required
+    expect(roleInput.safeParse({ userId: "u", role: "organizer", from: "user" }).success).toBe(false); // so is `clientOpId`
     expect(roleInput.safeParse({ ...r, role: "admin" }).success).toBe(false);
     expect(roleInput.safeParse({ ...r, clientOpId: "nope" }).success).toBe(false);
   });
