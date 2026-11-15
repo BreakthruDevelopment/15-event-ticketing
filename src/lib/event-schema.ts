@@ -144,6 +144,9 @@ export const updateTicketTypeInput = z
   .refine((v) => v.name !== undefined || v.capacity !== undefined || v.position !== undefined, "Nothing to change");
 export type UpdateTicketTypeInput = z.input<typeof updateTicketTypeInput>;
 
+/** One id per click on "Create invite" (src/lib/client-op.ts); a retry with the same id returns the same link. */
+export const newInviteInput = z.strictObject({ clientOpId });
+
 /** Staff-invite token in a body: any non-NUL text, so unknown, used and expired tokens (and nonsense) all answer the same 404. */
 export const inviteTokenInput = z.strictObject({ token: idText });
 

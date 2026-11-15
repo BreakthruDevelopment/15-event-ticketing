@@ -113,7 +113,9 @@ CREATE TABLE "staff_invite" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"event_id" uuid NOT NULL,
 	"token_digest" "bytea" NOT NULL,
+	"client_op_id" uuid NOT NULL,
 	"expires_at" timestamp with time zone NOT NULL,
+	"revoked_at" timestamp with time zone,
 	"used_by" text,
 	"used_at" timestamp with time zone,
 	"created_by" text,
@@ -198,6 +200,7 @@ CREATE UNIQUE INDEX "registration_event_user_active_uidx" ON "registration" USIN
 CREATE INDEX "registration_user_idx" ON "registration" USING btree ("user_id","created_at");--> statement-breakpoint
 CREATE INDEX "registration_ticket_type_idx" ON "registration" USING btree ("ticket_type_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "staff_invite_digest_uidx" ON "staff_invite" USING btree ("token_digest");--> statement-breakpoint
+CREATE UNIQUE INDEX "staff_invite_event_client_op_uidx" ON "staff_invite" USING btree ("event_id","client_op_id");--> statement-breakpoint
 CREATE INDEX "staff_invite_event_idx" ON "staff_invite" USING btree ("event_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "ticket_event_door_digest_uidx" ON "ticket" USING btree ("event_id","door_code_digest");--> statement-breakpoint
 CREATE INDEX "ticket_event_status_idx" ON "ticket" USING btree ("event_id","status");--> statement-breakpoint

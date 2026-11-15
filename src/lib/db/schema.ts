@@ -377,7 +377,11 @@ export const eventStaff = pgTable(
   (t) => [primaryKey({ columns: [t.eventId, t.userId] }), index("event_staff_user_idx").on(t.userId)],
 );
 
-/** Single-use invite links. Only the sha256 of the random token is stored; the link shows the token once. */
+/**
+ * Single-use invite links. Only the sha256 of the token is stored. The token is an HMAC of (event id, `client_op_id`)
+ * under a key derived from the app secret, so a retried create re-derives the same link instead of making another invite.
+ * Revoking sets `revoked_at` (the row stays, so a stale retry can't revive a revoked link).
+ */
 export const staffInvite = pgTable(
   "staff_invite",
   {
@@ -386,13 +390,20 @@ export const staffInvite = pgTable(
       .notNull()
       .references(() => event.id, { onDelete: "cascade" }),
     tokenDigest: bytea("token_digest").notNull(),
+    /** One id per user intent (src/lib/client-op.ts); unique per event, so a replayed create returns the first invite. */
+    clientOpId: uuid("client_op_id").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
     usedBy: text("used_by").references(() => user.id, { onDelete: "set null" }),
     usedAt: timestamp("used_at", { withTimezone: true }),
     createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("staff_invite_digest_uidx").on(t.tokenDigest), index("staff_invite_event_idx").on(t.eventId)],
+  (t) => [
+    uniqueIndex("staff_invite_digest_uidx").on(t.tokenDigest),
+    uniqueIndex("staff_invite_event_client_op_uidx").on(t.eventId, t.clientOpId),
+    index("staff_invite_event_idx").on(t.eventId),
+  ],
 );
 
 /** The check-in audit log and replay ledger (15.3): unique (actor, op id). */

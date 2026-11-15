@@ -8,7 +8,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type TestActor, cleanup, eventInput, fillRate, makeUser, openDoorInput } from "./helpers";
+import { type TestActor, cleanup, eventInput, fillRate, makeUser, op, openDoorInput } from "./helpers";
 
 const url = process.env.TEST_DATABASE_URL;
 const P = "ac";
@@ -112,7 +112,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
         () => TT.updateTicketType(attendee, live.id, liveType, { version: 1, name: "x" }),
         () => TT.deleteTicketType(attendee, live.id, liveType),
         () => ST.listStaff(attendee, live.id),
-        () => ST.createInvite(attendee, live.id),
+        () => ST.createInvite(attendee, live.id, op()),
         () => ST.revokeInvite(attendee, live.id, crypto.randomUUID()),
         () => ST.removeStaff(attendee, live.id, staffer.id),
         () => AD.adminStats(attendee),
@@ -148,7 +148,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
           () => TT.updateTicketType(orgA, id, liveType, { version: 1, name: "x" }),
           () => TT.deleteTicketType(orgA, id, liveType),
           () => ST.listStaff(orgA, id),
-          () => ST.createInvite(orgA, id),
+          () => ST.createInvite(orgA, id, op()),
           () => ST.revokeInvite(orgA, id, crypto.randomUUID()),
           () => ST.removeStaff(orgA, id, staffer.id),
         ];
@@ -172,7 +172,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       await sql`update "user" set role = 'user' where id = ${ghostOrg.id}`; // revoked behind the session's back
       await expect(EV.updateEvent(ghostOrg, e.id, { version: 1, title: "still here?" })).rejects.toMatchObject({ status: 403 });
       await expect(EV.createEvent(ghostOrg, eventInput())).rejects.toMatchObject({ status: 403 });
-      await expect(ST.createInvite(ghostOrg, e.id)).rejects.toMatchObject({ status: 403 });
+      await expect(ST.createInvite(ghostOrg, e.id, op())).rejects.toMatchObject({ status: 403 });
       await sql`update "user" set banned = true, role = 'organizer' where id = ${ghostOrg.id}`;
       await expect(EV.createEvent(ghostOrg, eventInput())).rejects.toMatchObject({ status: 403 }); // banned
     });
@@ -198,7 +198,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
         () => TT.createTicketType(admin, live.id, { name: "VIP", capacity: 1 }),
         () => TT.deleteTicketType(admin, live.id, liveType),
         () => ST.listStaff(admin, live.id),
-        () => ST.createInvite(admin, live.id),
+        () => ST.createInvite(admin, live.id, op()),
         () => ST.removeStaff(admin, live.id, staffer.id),
         () => ST.acceptInvite(admin, { token: "whatever" }),
         () => ST.listDoorEvents(admin),
@@ -223,7 +223,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
 
   describe("door staff (per event, not a role)", () => {
     it("staff of event A can use A's door and nothing of event B's; a stranger gets 404 on both", async () => {
-      const inv = await ST.createInvite(orgA, live.id);
+      const inv = await ST.createInvite(orgA, live.id, op());
       const token = new URL(inv.link).hash.slice("#t=".length);
       await ST.acceptInvite(staffer, { token });
       const a = await AC.resolveDoorAccess(D, staffer, live.id);
@@ -260,7 +260,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       const o = await makeUser(sql, P, "hiddenorg", "organizer");
       const s = await makeUser(sql, P, "hiddenstaff", "user");
       const e = await publish(o, openDoorInput());
-      const token = new URL((await ST.createInvite(o, e.id)).link).hash.slice(3);
+      const token = new URL((await ST.createInvite(o, e.id, op())).link).hash.slice(3);
       await ST.acceptInvite(s, { token });
       await AD.hideEvent(admin, e.id, { hidden: true, reason: "abuse" });
       const hidden = await AC.resolveDoorAccess(D, s, e.id);
@@ -408,7 +408,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       const o = await makeUser(sql, P, "limited", "organizer");
       const s = await makeUser(sql, P, "limitedstaff", "user");
       const e = await publish(o, eventInput({ title: "Limited" }));
-      const token = new URL((await ST.createInvite(o, e.id)).link).hash.slice(3);
+      const token = new URL((await ST.createInvite(o, e.id, op())).link).hash.slice(3);
       const target = await makeUser(sql, P, "limitedtarget", "user");
       const adm = await makeUser(sql, P, "limitedadmin", "admin");
 
@@ -420,7 +420,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
         () => TT.createTicketType(o, e.id, { name: "VIP", capacity: 1 }),
         () => TT.updateTicketType(o, e.id, e.typeId, { version: 1, name: "x" }),
         () => TT.deleteTicketType(o, e.id, e.typeId),
-        () => ST.createInvite(o, e.id),
+        () => ST.createInvite(o, e.id, op()),
         () => ST.revokeInvite(o, e.id, crypto.randomUUID()),
         () => ST.removeStaff(o, e.id, "someone"),
       ];

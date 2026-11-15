@@ -1,12 +1,12 @@
 import "server-only";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, hkdfSync } from "node:crypto";
 import { and, asc, count, desc, eq, gt, isNull, lte, sql } from "drizzle-orm";
 import { assertCan } from "@/lib/access";
 import { type Actor, toRole } from "@/lib/auth/rbac";
 import { db, schema } from "@/lib/db";
 import { env } from "@/lib/env";
 import { CodedConflictError, NotFoundError } from "@/lib/errors";
-import { LIMITS, idParam, inviteTokenInput } from "@/lib/event-schema";
+import { LIMITS, idParam, inviteTokenInput, newInviteInput } from "@/lib/event-schema";
 import { lockOwnEvent } from "@/lib/events";
 import { log } from "@/lib/log";
 import { idText } from "@/lib/text";
@@ -17,9 +17,11 @@ import { writeTx } from "@/lib/write-tx";
  *
  * Staff is not a role: it is a row in `event_staff`, created when a signed-in user accepts the organiser's invite and
  * checked on every door request (`resolveDoorAccess` in src/lib/access.ts), so removal takes effect on the next scan.
- * An invite is a random 128-bit token; only its sha256 is stored, and the link carries it in the URL FRAGMENT
- * (`/staff-invite#t=<token>`), which browsers never send, so request logs and referrers never see it. It is shown once,
- * single use, and expires after 72 hours.
+ * An invite is a 128-bit token; only its sha256 is stored, and the link carries it in the URL FRAGMENT
+ * (`/staff-invite#t=<token>`), which browsers never send, so request logs and referrers never see it. It is single
+ * use and expires after 72 hours. The token is HMAC(key, event id + client op id) with the key derived from
+ * `BETTER_AUTH_SECRET` (HKDF), so it is unguessable, never stored, and a retried create (same `clientOpId`) re-derives
+ * the same link instead of making a second invite whose link nobody could recover.
  */
 
 const S = schema.eventStaff;
@@ -27,6 +29,18 @@ const I = schema.staffInvite;
 const E = schema.event;
 
 const digest = (token: string) => createHash("sha256").update(token).digest();
+
+let inviteKey: Buffer | undefined;
+/** The token for (event, op id): 16 bytes of HMAC-SHA256, base64url (22 characters). */
+function inviteToken(eventId: string, clientOpId: string): string {
+  inviteKey ??= Buffer.from(hkdfSync("sha256", env().BETTER_AUTH_SECRET, "breakthru:15-event-ticketing", "staff-invite:v1", 32));
+  return createHmac("sha256", inviteKey).update(`${eventId}:${clientOpId}`).digest().subarray(0, 16).toString("base64url");
+}
+
+const linkFor = (token: string) => `${env().APP_URL.replace(/\/$/, "")}/staff-invite#t=${token}`;
+
+/** An invite that can still be accepted. */
+const openInvite = () => and(isNull(I.usedAt), isNull(I.revokedAt), gt(I.expiresAt, sql`now()`));
 
 /** The 404 for an unknown, used or expired token: one message, so a prober learns nothing. */
 const noInvite = () => new NotFoundError("This invite isn't valid.");
@@ -47,50 +61,65 @@ export async function listStaff(actor: Actor | null, rawEventId: string) {
   const invites = await db()
     .select({ id: I.id, createdAt: I.createdAt, expiresAt: I.expiresAt })
     .from(I)
-    .where(and(eq(I.eventId, eventId), isNull(I.usedAt), gt(I.expiresAt, sql`now()`)))
+    .where(and(eq(I.eventId, eventId), openInvite()))
     .orderBy(desc(I.createdAt))
     .limit(LIMITS.openInvitesPerEvent);
   return { staff, invites };
 }
 
 /**
- * Create a single-use invite (72 hours) and return the link ONCE. At most 10 open invites per event. A retry makes a
- * second, equally valid invite (the token can't be shown again); the organiser revokes the extra one.
+ * Create a single-use invite (72 hours) and return its link. Body `{ clientOpId }`, one id per click: a retry with the
+ * same id returns the same invite and link with `replayed: true` (the unique (event, op id) index backs it, and the
+ * organiser's allowance lock serialises parallel duplicates), and costs no extra open-invite slot. A retry after the
+ * invite was used, revoked or expired is 409 `invite_closed`: it needs a new id. At most 10 open invites per event.
  */
-export async function createInvite(actor: Actor | null, rawEventId: string) {
+export async function createInvite(actor: Actor | null, rawEventId: string, input: unknown) {
   assertCan(actor, "event:manage");
-  const token = randomBytes(16).toString("base64url");
+  const { clientOpId } = newInviteInput.parse(input);
   const out = await writeTx(actor, "event:manage", async (tx) => {
     const ev = await lockOwnEvent(tx, actor, rawEventId);
+    const token = inviteToken(ev.id, clientOpId);
+    const [existing] = await tx
+      .select({ id: I.id, expiresAt: I.expiresAt, usedAt: I.usedAt, revokedAt: I.revokedAt, expired: sql<boolean>`${I.expiresAt} <= now()` })
+      .from(I)
+      .where(and(eq(I.eventId, ev.id), eq(I.clientOpId, clientOpId)));
+    if (existing) {
+      if (existing.usedAt || existing.revokedAt || existing.expired) {
+        throw new CodedConflictError("invite_closed", "That invite was already used, revoked or has expired. Create a new one.");
+      }
+      return { eventId: ev.id, id: existing.id, expiresAt: existing.expiresAt, token, replayed: true };
+    }
     if (ev.status === "cancelled") throw new CodedConflictError("event_cancelled", "A cancelled event can't take door staff.");
     // The event row lock also serialises this count against other invites and against accepts, so the cap is exact.
-    const [{ open }] = await tx
-      .select({ open: count() })
-      .from(I)
-      .where(and(eq(I.eventId, ev.id), isNull(I.usedAt), gt(I.expiresAt, sql`now()`)));
+    const [{ open }] = await tx.select({ open: count() }).from(I).where(and(eq(I.eventId, ev.id), openInvite()));
     if (open >= LIMITS.openInvitesPerEvent) throw new CodedConflictError("invite_limit", `At most ${LIMITS.openInvitesPerEvent} invites can be open at once. Revoke one first.`);
     const [row] = await tx
       .insert(I)
       .values({
         eventId: ev.id,
         tokenDigest: digest(token),
+        clientOpId,
         expiresAt: sql`now() + make_interval(hours => ${LIMITS.inviteTtlHours})`,
         createdBy: actor.id,
       })
       .returning({ id: I.id, expiresAt: I.expiresAt });
-    return { eventId: ev.id, ...row };
+    return { eventId: ev.id, ...row, token, replayed: false };
   });
-  log.info("staff.invite.created", { actorId: actor.id, eventId: out.eventId });
-  return { id: out.id, expiresAt: out.expiresAt, link: `${env().APP_URL.replace(/\/$/, "")}/staff-invite#t=${token}` };
+  if (!out.replayed) log.info("staff.invite.created", { actorId: actor.id, eventId: out.eventId });
+  return { id: out.id, expiresAt: out.expiresAt, link: linkFor(out.token), replayed: out.replayed };
 }
 
-/** Revoke an open invite. A second call (or an unknown id) answers `revoked: false`; a foreign event is a 404 first. */
+/** Revoke an open invite (it stays as a row, marked, so a stale retry can't recreate it). A second call, a used invite or an unknown id answers `revoked: false`; a foreign event is a 404 first. */
 export async function revokeInvite(actor: Actor | null, rawEventId: string, rawInviteId: string): Promise<{ revoked: boolean }> {
   assertCan(actor, "event:manage");
   const inviteId = idParam.parse(rawInviteId);
   return writeTx(actor, "event:manage", async (tx) => {
     const ev = await lockOwnEvent(tx, actor, rawEventId);
-    const rows = await tx.delete(I).where(and(eq(I.id, inviteId), eq(I.eventId, ev.id))).returning({ id: I.id });
+    const rows = await tx
+      .update(I)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(I.id, inviteId), eq(I.eventId, ev.id), isNull(I.usedAt), isNull(I.revokedAt)))
+      .returning({ id: I.id });
     return { revoked: rows.length > 0 };
   });
 }
@@ -130,7 +159,7 @@ export async function acceptInvite(actor: Actor | null, input: unknown) {
     const [used] = await tx
       .update(I)
       .set({ usedBy: actor.id, usedAt: new Date() })
-      .where(and(eq(I.id, peek.id), isNull(I.usedAt), gt(I.expiresAt, sql`now()`)))
+      .where(and(eq(I.id, peek.id), openInvite()))
       .returning({ createdBy: I.createdBy });
     if (!used) {
       const [again] = await tx.select({ usedBy: I.usedBy }).from(I).where(eq(I.id, peek.id));

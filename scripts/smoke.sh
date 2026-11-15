@@ -184,8 +184,11 @@ echo "$BODY" | jq -e '.event | has("organizerId") or has("clientOpId") or has("h
 req /dev/null GET "/api/events/by-slug/no-such-event-$RUN_ID"; expect 404 "an unknown slug"
 pass "the published event is listed and opens by slug with seats left"
 
-req "$JAR_O" POST "/api/organizer/events/$EVENT_ID/staff/invites"; expect 201 "create an invite"
+INVITE_OP="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)"
+req "$JAR_O" POST "/api/organizer/events/$EVENT_ID/staff/invites" "{\"clientOpId\":\"$INVITE_OP\"}"; expect 201 "create an invite"
 INVITE_ID=$(echo "$BODY" | jq -r '.id'); LINK=$(echo "$BODY" | jq -r '.link')
+req "$JAR_O" POST "/api/organizer/events/$EVENT_ID/staff/invites" "{\"clientOpId\":\"$INVITE_OP\"}"; expect 200 "replayed invite"
+[ "$(echo "$BODY" | jq -r '.id')" = "$INVITE_ID" ] && [ "$(echo "$BODY" | jq -r '.link')" = "$LINK" ] || fail "a replayed invite must return the same invite and link: $BODY"
 case "$LINK" in *"/staff-invite#t="*) ;; *) fail "the invite link must carry the token in the fragment: $LINK" ;; esac
 TOKEN="${LINK#*#t=}"
 req "$JAR_B" POST /api/staff-invites/accept "{\"token\":\"$TOKEN\"}"; expect 200 "accept the invite"

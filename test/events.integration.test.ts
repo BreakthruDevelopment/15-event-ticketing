@@ -6,7 +6,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { type TestActor, cleanup, eventInput, makeUser } from "./helpers";
+import { type TestActor, cleanup, eventInput, makeUser, op } from "./helpers";
 
 const url = process.env.TEST_DATABASE_URL;
 const P = "ev";
@@ -230,7 +230,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
         ["deleteTicketType event", (b) => TT.deleteTicketType(org, b, ghost())],
         ["deleteTicketType type", (b) => TT.deleteTicketType(org, e.id, b)],
         ["listStaff", (b) => ST.listStaff(org, b)],
-        ["createInvite", (b) => ST.createInvite(org, b)],
+        ["createInvite", (b) => ST.createInvite(org, b, op())],
         ["revokeInvite event", (b) => ST.revokeInvite(org, b, ghost())],
         ["revokeInvite invite", (b) => ST.revokeInvite(org, e.id, b)],
         ["removeStaff event", (b) => ST.removeStaff(org, b, "someone")],
@@ -252,7 +252,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
         () => TT.updateTicketType(org, e.id, ghost(), { version: 1, name: "y" }),
         () => TT.deleteTicketType(org, e.id, ghost()),
         () => ST.listStaff(org, ghost()),
-        () => ST.createInvite(org, ghost()),
+        () => ST.createInvite(org, ghost(), op()),
         () => ST.revokeInvite(org, ghost(), ghost()),
         () => ST.removeStaff(org, ghost(), "someone"),
       ]) {
@@ -379,7 +379,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
       const { event: e, type } = await withType();
       const guest = await makeUser(sql, P, "cascade-guest", "user");
       await sql`insert into event_staff (event_id, user_id) values (${e.id}, ${guest.id})`;
-      await sql`insert into staff_invite (event_id, token_digest, expires_at) values (${e.id}, ${Buffer.from("d1")}, now() + interval '1 day')`;
+      await sql`insert into staff_invite (event_id, token_digest, client_op_id, expires_at) values (${e.id}, ${Buffer.from("d1")}, ${crypto.randomUUID()}, now() + interval '1 day')`;
       const [reg] = await sql`insert into registration (event_id, ticket_type_id, user_id, quantity, client_op_id, payload_hash) values (${e.id}, ${type.id}, ${guest.id}, 1, ${crypto.randomUUID()}, 'h') returning id`;
       const [tk] = await sql`insert into ticket (event_id, ticket_type_id, registration_id, holder_user_id, holder_name, source, door_code_digest) values (${e.id}, ${type.id}, ${reg.id}, ${guest.id}, 'G', 'registration', ${Buffer.from("dc1")}) returning id`;
       await sql`insert into checkin_event (event_id, ticket_id, actor_id, op_id, payload_hash, method, outcome) values (${e.id}, ${tk.id}, ${guest.id}, ${crypto.randomUUID()}, 'h', 'qr', 'checked_in')`;
@@ -483,7 +483,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
       const b = (await EV.createEvent(racer, eventInput({ title: "Race B" }))).event;
       await TT.createTicketType(racer, a.id, { name: "General", capacity: 50 });
       await EV.updateEvent(racer, a.id, { version: 1, status: "published" });
-      await ST.createInvite(racer, a.id);
+      await ST.createInvite(racer, a.id, op());
       const ops: Promise<unknown>[] = [];
       for (let round = 0; round < 6; round++) {
         ops.push(
@@ -491,7 +491,7 @@ describe.skipIf(!url)("events (Postgres)", () => {
           EV.updateEvent(racer, b.id, { version: 1 + round, title: `Race B ${round}` }),
           TT.createTicketType(racer, a.id, { name: `R${round}`, capacity: 5 }),
           TT.createTicketType(racer, b.id, { name: `R${round}`, capacity: 5 }),
-          ST.createInvite(racer, b.id),
+          ST.createInvite(racer, b.id, op()),
           EV.createEvent(racer, eventInput({ title: `Racing ${round}` })),
           AD.hideEvent(admin, a.id, { hidden: round % 2 === 0, reason: "race" }),
           R.setUserRole(admin, { userId: racer.id, role: round % 2 === 0 ? "user" : "organizer", from: round % 2 === 0 ? "organizer" : "user" }),

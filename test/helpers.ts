@@ -49,7 +49,8 @@ export function openDoorInput(overrides: Record<string, unknown> = {}) {
   });
 }
 
-export const asUser = (a: TestActor): TestActor => a;
+/** A fresh `{ clientOpId }` body for `createInvite`. */
+export const op = () => ({ clientOpId: crypto.randomUUID() });
 
 /** Fill `kind` rate allowance for `userId` so the next attempt is over the limit (or `n` short of it). */
 export async function fillRate(sql: postgres.Sql, userId: string, n: number, kind = "api_write") {

@@ -1,5 +1,5 @@
 {
-  "id": "5eb88166-1e20-410c-a37e-75e3b94e2abd",
+  "id": "0427be55-2dbf-4bd7-8bcd-627829deb39b",
   "prevId": "a3bc9bdb-aa03-4674-b367-de912f6fcc46",
   "version": "7",
   "dialect": "postgresql",
@@ -1815,11 +1815,23 @@
           "primaryKey": false,
           "notNull": true
         },
+        "client_op_id": {
+          "name": "client_op_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
         "expires_at": {
           "name": "expires_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "used_by": {
           "name": "used_by",
@@ -1853,6 +1865,27 @@
           "columns": [
             {
               "expression": "token_digest",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "staff_invite_event_client_op_uidx": {
+          "name": "staff_invite_event_client_op_uidx",
+          "columns": [
+            {
+              "expression": "event_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "client_op_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

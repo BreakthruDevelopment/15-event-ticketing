@@ -7,7 +7,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type TestActor, cleanup, makeUser, openDoorInput } from "./helpers";
+import { type TestActor, cleanup, makeUser, op, openDoorInput } from "./helpers";
 
 const url = process.env.TEST_DATABASE_URL;
 const P = "st";
@@ -28,7 +28,7 @@ describe.skipIf(!url)("door staff (Postgres)", () => {
   const tokenOf = (link: string) => new URL(link).hash.slice("#t=".length);
   const newUser = () => makeUser(sql, P, `u${++n}`, "user");
   const invite = async (eventId = event.id, who = org) => {
-    const inv = await ST.createInvite(who, eventId);
+    const inv = await ST.createInvite(who, eventId, op());
     return { ...inv, token: tokenOf(inv.link) };
   };
   const door = (a: TestActor, id = event.id) => AC.resolveDoorAccess(D, a, id);
@@ -63,7 +63,7 @@ describe.skipIf(!url)("door staff (Postgres)", () => {
   });
 
   describe("create", () => {
-    it("returns the link once, with the token in the URL fragment; only its sha256 is stored", async () => {
+    it("returns a link with the token in the URL fragment; only its sha256 is stored", async () => {
       const inv = await invite();
       expect(inv.link).toMatch(/^http:\/\/localhost:3000\/staff-invite#t=[A-Za-z0-9_-]{22}$/);
       expect(new URL(inv.link).search).toBe("");
@@ -85,19 +85,73 @@ describe.skipIf(!url)("door staff (Postgres)", () => {
       expect(Object.keys(invites[0]).sort()).toEqual(["createdAt", "expiresAt", "id"]);
     });
 
+    it("a retry with the same clientOpId returns the same invite and link, uses no extra slot, and parallel duplicates make one invite", async () => {
+      const e = await mkEvent(org, { title: "Invite replay" });
+      const body = op();
+      const first = await ST.createInvite(org, e.id, body);
+      expect(first.replayed).toBe(false);
+      const again = await ST.createInvite(org, e.id, body);
+      expect(again).toMatchObject({ id: first.id, link: first.link, replayed: true });
+      const par = op();
+      const results = await Promise.all(Array.from({ length: 6 }, () => ST.createInvite(org, e.id, par)));
+      expect(new Set(results.map((r) => r.id)).size).toBe(1);
+      expect(new Set(results.map((r) => r.link)).size).toBe(1);
+      expect(results.filter((r) => !r.replayed)).toHaveLength(1);
+      const [{ n }] = await sql`select count(*)::int as n from staff_invite where event_id = ${e.id}`;
+      expect(n).toBe(2);
+      // The replayed link still works, once.
+      await expect(ST.acceptInvite(await newUser(), { token: tokenOf(again.link) })).resolves.toMatchObject({ replayed: false });
+      // Retries never eat the 10-slot allowance.
+      const o = op();
+      for (let i = 0; i < 15; i++) await ST.createInvite(org, e.id, o);
+      expect((await ST.listStaff(org, e.id)).invites).toHaveLength(2);
+    });
+
+    it("a retry after the invite was used, revoked or expired is 409 invite_closed, and a revoked link can't be revived", async () => {
+      const e = await mkEvent(org, { title: "Invite closed" });
+      const used = op();
+      const u = await ST.createInvite(org, e.id, used);
+      await ST.acceptInvite(await newUser(), { token: tokenOf(u.link) });
+      await expect(ST.createInvite(org, e.id, used)).rejects.toMatchObject({ status: 409, code: "invite_closed" });
+      const revoked = op();
+      const r = await ST.createInvite(org, e.id, revoked);
+      await ST.revokeInvite(org, e.id, r.id);
+      await expect(ST.createInvite(org, e.id, revoked)).rejects.toMatchObject({ status: 409, code: "invite_closed" });
+      await expect(ST.acceptInvite(await newUser(), { token: tokenOf(r.link) })).rejects.toMatchObject({ status: 404 });
+      const expired = op();
+      const x = await ST.createInvite(org, e.id, expired);
+      await sql`update staff_invite set expires_at = now() - interval '1 second' where id = ${x.id}`;
+      await expect(ST.createInvite(org, e.id, expired)).rejects.toMatchObject({ status: 409, code: "invite_closed" });
+      // Revoking a used invite changes nothing.
+      await expect(ST.revokeInvite(org, e.id, u.id)).resolves.toEqual({ revoked: false });
+    });
+
+    it("the token depends on the event and the op id: the same op id on another event, or by another organiser, is another token; a body without a valid op id is a 400", async () => {
+      const e2 = await mkEvent(org, { title: "Invite other" });
+      const e3 = await mkEvent(org2, { title: "Invite third" });
+      const body = op();
+      const a = await ST.createInvite(org, event.id, body);
+      const b = await ST.createInvite(org, e2.id, body);
+      const c = await ST.createInvite(org2, e3.id, body);
+      expect(new Set([tokenOf(a.link), tokenOf(b.link), tokenOf(c.link)]).size).toBe(3);
+      for (const bad of [undefined, null, {}, { clientOpId: "nope" }, { clientOpId: crypto.randomUUID(), extra: 1 }, { clientOpId: "\0" }]) {
+        expect((await ST.createInvite(org, event.id, bad).catch((x) => x)).name, JSON.stringify(bad)).toBe("ZodError");
+      }
+    });
+
     it("caps open invites at 10 per event exactly under parallel creates, and a revoked one frees a slot", async () => {
       const e = await mkEvent(org, { title: "Invite cap" });
-      const r = await Promise.allSettled(Array.from({ length: 14 }, () => ST.createInvite(org, e.id)));
+      const r = await Promise.allSettled(Array.from({ length: 14 }, () => ST.createInvite(org, e.id, op())));
       const ok = r.filter((x): x is PromiseFulfilledResult<Awaited<ReturnType<typeof ST.createInvite>>> => x.status === "fulfilled");
       expect(ok).toHaveLength(10);
       for (const x of r.filter((x) => x.status === "rejected") as PromiseRejectedResult[]) expect(x.reason).toMatchObject({ status: 409, code: "invite_limit" });
       await expect(ST.revokeInvite(org, e.id, ok[0].value.id)).resolves.toEqual({ revoked: true });
       await expect(ST.revokeInvite(org, e.id, ok[0].value.id)).resolves.toEqual({ revoked: false });
-      await expect(ST.createInvite(org, e.id)).resolves.toBeTruthy();
+      await expect(ST.createInvite(org, e.id, op())).resolves.toBeTruthy();
     });
 
     it("another organiser can't create, list or revoke on this event (404); a revoked invite can't be accepted", async () => {
-      await expect(ST.createInvite(org2, event.id)).rejects.toMatchObject({ status: 404 });
+      await expect(ST.createInvite(org2, event.id, op())).rejects.toMatchObject({ status: 404 });
       await expect(ST.listStaff(org2, event.id)).rejects.toMatchObject({ status: 404 });
       const inv = await invite();
       await expect(ST.revokeInvite(org2, event.id, inv.id)).rejects.toMatchObject({ status: 404 });
@@ -159,7 +213,7 @@ describe.skipIf(!url)("door staff (Postgres)", () => {
       const cur = await EV.getMyEvent(org, e.id);
       await EV.updateEvent(org, e.id, { version: cur.version, status: "cancelled" });
       await expect(ST.acceptInvite(await newUser(), { token: inv.token })).rejects.toMatchObject({ status: 404 });
-      await expect(ST.createInvite(org, e.id)).rejects.toMatchObject({ status: 409, code: "event_cancelled" });
+      await expect(ST.createInvite(org, e.id, op())).rejects.toMatchObject({ status: 409, code: "event_cancelled" });
       await EV.deleteEvent(org, e.id);
       await expect(ST.acceptInvite(await newUser(), { token: inv.token })).rejects.toMatchObject({ status: 404 });
     });
@@ -186,10 +240,10 @@ describe.skipIf(!url)("door staff (Postgres)", () => {
     it("caps staff at 20 per event: the 21st accept is a 409 and the invite stays unused", async () => {
       const e = await mkEvent(org, { title: "Full crew" });
       for (let i = 0; i < 20; i++) {
-        const inv = await ST.createInvite(org, e.id);
+        const inv = await ST.createInvite(org, e.id, op());
         await ST.acceptInvite(await newUser(), { token: tokenOf(inv.link) });
       }
-      const inv = await ST.createInvite(org, e.id);
+      const inv = await ST.createInvite(org, e.id, op());
       await expect(ST.acceptInvite(await newUser(), { token: tokenOf(inv.link) })).rejects.toMatchObject({ status: 409, code: "staff_full" });
       const [row] = await sql`select used_at from staff_invite where id = ${inv.id}`;
       expect(row.used_at).toBeNull();
@@ -199,13 +253,13 @@ describe.skipIf(!url)("door staff (Postgres)", () => {
     it("accepts, invites, revokes and removals racing each other finish without a deadlock or a 500", async () => {
       const e = await mkEvent(org, { title: "Staff race" });
       const users = await Promise.all(Array.from({ length: 6 }, () => newUser()));
-      const invs = await Promise.all(users.map(() => ST.createInvite(org, e.id)));
+      const invs = await Promise.all(users.map(() => ST.createInvite(org, e.id, op())));
       const ops: Promise<unknown>[] = [];
       users.forEach((u, i) => {
         ops.push(ST.acceptInvite(u, { token: tokenOf(invs[i].link) }));
         ops.push(ST.removeStaff(org, e.id, u.id));
         ops.push(ST.revokeInvite(org, e.id, invs[i].id));
-        ops.push(ST.createInvite(org, e.id));
+        ops.push(ST.createInvite(org, e.id, op()));
       });
       ops.push(EV.updateEvent(org, e.id, { version: 1, title: "Staff race 2" }));
       const results = await Promise.allSettled(ops);
