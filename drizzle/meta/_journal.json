@@ -36,6 +36,13 @@
       "when": 1794783812708,
       "tag": "0004_event-ticketing",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794786039815,
+      "tag": "0005_api-read-rate-kind",
+      "breakpoints": true
     }
   ]
 }

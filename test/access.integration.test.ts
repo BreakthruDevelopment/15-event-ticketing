@@ -289,6 +289,23 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       expect(row.used_at).toBeNull();
     });
 
+    it("organiser and admin reads spend the per-user api_read allowance (429 over 1200/hour)", async () => {
+      const o = await makeUser(sql, P, "readlimit", "organizer");
+      const adm = await makeUser(sql, P, "readlimitadm", "admin");
+      const e = (await EV.createEvent(o, eventInput({ title: "Read limit" }))).event;
+      await fillRate(sql, o.id, 1200, "api_read");
+      await fillRate(sql, adm.id, 1200, "api_read");
+      for (const call of [() => EV.listMyEvents(o), () => EV.getMyEvent(o, e.id), () => ST.listStaff(o, e.id), () => AD.adminStats(adm)]) {
+        await expect(call()).rejects.toMatchObject({ status: 429 });
+      }
+      await fillRate(sql, o.id, 1198, "api_read");
+      await expect(EV.listMyEvents(o)).resolves.toHaveLength(1);
+      await expect(EV.getMyEvent(o, e.id)).resolves.toMatchObject({ id: e.id });
+      await expect(EV.listMyEvents(o)).rejects.toMatchObject({ status: 429 });
+      // A write's read-back doesn't spend the read allowance.
+      await EV.updateEvent(o, e.id, { version: 1, title: "Read limit 2" });
+    });
+
     it("listing door events spends the per-user door_read allowance (429 over 600/hour), even with no events", async () => {
       const u = await makeUser(sql, P, "doorread", "user");
       await fillRate(sql, u.id, 599, "door_read");

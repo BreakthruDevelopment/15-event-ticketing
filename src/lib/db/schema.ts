@@ -114,7 +114,7 @@ export const item = pgTable(
  * `register`, `checkin`, `checkin_miss` and `door_read` are spent by 15.2 and 15.3; they are listed here because the
  * CHECK constraint is part of the schema and only the foundation slice may change it.
  */
-export const RATE_KINDS = ["api_write", "ai", "upload", "register", "checkin", "checkin_miss", "door_read"] as const;
+export const RATE_KINDS = ["api_write", "api_read", "ai", "upload", "register", "checkin", "checkin_miss", "door_read"] as const;
 export const DAILY_USAGE_KINDS = ["ai", "demo_load"] as const;
 
 const list = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));

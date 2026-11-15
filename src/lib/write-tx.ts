@@ -2,7 +2,7 @@ import "server-only";
 import { type Capability, lockActor, rolesFor } from "@/lib/access";
 import type { Actor } from "@/lib/auth/rbac";
 import { db } from "@/lib/db";
-import { LIMITS, TOO_MANY_WRITES } from "@/lib/event-schema";
+import { LIMITS, TOO_MANY_READS, TOO_MANY_WRITES } from "@/lib/event-schema";
 import { type Tx, consumeRate } from "@/lib/usage";
 
 /**
@@ -18,4 +18,12 @@ export function writeTx<T>(actor: Actor, capability: Capability, work: (tx: Tx) 
     await consumeRate(tx, actor.id, "api_write", LIMITS.writesPerHour, TOO_MANY_WRITES);
     return work(tx);
   });
+}
+
+/**
+ * Spend one of the actor's signed-in read allowance (`api_read`, 1200 per hour, 429 over it) before an organiser or
+ * admin read touches the database. Its own short transaction: reads take no other locks.
+ */
+export function spendRead(actor: Actor): Promise<void> {
+  return db().transaction((tx) => consumeRate(tx, actor.id, "api_read", LIMITS.readsPerHour, TOO_MANY_READS));
 }

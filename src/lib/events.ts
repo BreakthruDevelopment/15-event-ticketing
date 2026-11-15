@@ -21,7 +21,7 @@ import {
 import { log } from "@/lib/log";
 import { withOp } from "@/lib/op-ledger";
 import { type Tx } from "@/lib/usage";
-import { writeTx } from "@/lib/write-tx";
+import { spendRead, writeTx } from "@/lib/write-tx";
 
 /**
  * Event data layer (organiser side and the public reads). Every function takes the acting user (public reads take
@@ -130,6 +130,12 @@ export type OwnerEvent = Awaited<ReturnType<typeof selectOwner>>[number] & { tic
 /** An event the actor owns, with its ticket types, or 404. Used by every organiser read and write. */
 export async function getMyEvent(actor: Actor | null, rawId: string): Promise<OwnerEvent> {
   assertCan(actor, "event:manage");
+  await spendRead(actor);
+  return loadMyEvent(actor, rawId);
+}
+
+/** `getMyEvent` without spending the read allowance: for the read-back after a write, which already spent a write. */
+async function loadMyEvent(actor: Actor, rawId: string): Promise<OwnerEvent> {
   const id = idParam.parse(rawId);
   const [row] = await selectOwner(and(eq(E.id, id), eq(E.organizerId, actor.id)));
   if (!row) throw new NotFoundError();
@@ -139,6 +145,7 @@ export async function getMyEvent(actor: Actor | null, rawId: string): Promise<Ow
 /** The organiser's own events, newest first, with capacity totals. At most 20 (the per-organiser cap). */
 export async function listMyEvents(actor: Actor | null) {
   assertCan(actor, "event:manage");
+  await spendRead(actor);
   return db()
     .select({
       ...ownerColumns,
@@ -246,7 +253,7 @@ export async function createEvent(actor: Actor | null, input: unknown): Promise<
     const [still] = await db().select({ id: E.id }).from(E).where(and(eq(E.id, id), eq(E.organizerId, actor.id)));
     if (!still) throw new CodedConflictError("event_deleted", "That event was deleted. Create it again with a new request.");
   }
-  return { event: await getMyEvent(actor, id), created };
+  return { event: await loadMyEvent(actor, id), created };
 }
 
 /** The facts whose change bumps `faq_version` (E1-E5: when, where, about, registration close, contact; ticket type names bump it in ticket-types.ts). */
@@ -322,7 +329,7 @@ export async function updateEvent(actor: Actor | null, rawId: string, input: unk
       throw err;
     }
   });
-  return getMyEvent(actor, rawId);
+  return loadMyEvent(actor, rawId);
 }
 
 async function currentOwnerView(tx: Tx, id: string) {

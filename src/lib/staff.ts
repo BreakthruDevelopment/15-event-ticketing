@@ -13,7 +13,7 @@ import { withOp } from "@/lib/op-ledger";
 import { idText } from "@/lib/text";
 import { deriveKey } from "@/lib/tickets/keys";
 import { consumeRate } from "@/lib/usage";
-import { writeTx } from "@/lib/write-tx";
+import { spendRead, writeTx } from "@/lib/write-tx";
 
 /**
  * Door staff: invites, accept, remove, and the list of events a user may open the door for.
@@ -58,6 +58,7 @@ const noInvite = () => new NotFoundError("This invite isn't valid.");
 /** Staff and open invites of one of the organiser's events. Never the token. */
 export async function listStaff(actor: Actor | null, rawEventId: string) {
   assertCan(actor, "event:manage");
+  await spendRead(actor);
   const eventId = idParam.parse(rawEventId);
   const [ev] = await db().select({ id: E.id }).from(E).where(and(eq(E.id, eventId), eq(E.organizerId, actor.id)));
   if (!ev) throw new NotFoundError();

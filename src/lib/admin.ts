@@ -9,7 +9,7 @@ import { ORGANIZER_REVOKED, hideInput, idParam } from "@/lib/event-schema";
 import { log } from "@/lib/log";
 import { withOp } from "@/lib/op-ledger";
 import { dailyCount } from "@/lib/usage";
-import { writeTx } from "@/lib/write-tx";
+import { spendRead, writeTx } from "@/lib/write-tx";
 
 /** The FAQ bot's cap per event per day (spec "Rate limits and caps"); enforced by the FAQ route (15.5), shown here. */
 export const FAQ_ASKS_PER_EVENT_PER_DAY = 300;
@@ -25,6 +25,7 @@ const startOfUtcDay = () => {
  */
 export async function adminStats(actor: Actor | null) {
   assertCan(actor, "admin:stats");
+  await spendRead(actor);
   const d = db();
   const E = schema.event;
   const byStatus = await d.select({ status: E.status, n: count() }).from(E).groupBy(E.status);

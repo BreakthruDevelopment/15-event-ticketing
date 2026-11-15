@@ -13,6 +13,7 @@ export const LIMITS = {
   capacityPerType: 5_000,
   capacityPerEvent: 10_000,
   writesPerHour: 300,
+  readsPerHour: 1200,
   doorReadsPerHour: 600,
   staffPerEvent: 20,
   openInvitesPerEvent: 10,
