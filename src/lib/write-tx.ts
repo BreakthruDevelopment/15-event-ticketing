@@ -1,4 +1,5 @@
 import "server-only";
+import { ZodError } from "zod";
 import { type Capability, lockActor, rolesFor } from "@/lib/access";
 import type { Actor } from "@/lib/auth/rbac";
 import { db } from "@/lib/db";
@@ -17,6 +18,10 @@ import { type Tx, consumeRate } from "@/lib/usage";
  * attempt is spent in its own short transaction and the error is rethrown. If that spend is over the limit the answer is
  * 429 instead. So probing ids or tokens, or reading through a conflict's body, can't be done without limit. Refusals
  * for authorisation (401/403) and for rate (429) are not charged again, and a server fault (500) is not the caller's.
+ *
+ * A malformed body or id is a refusal too: `work` parses its input (zod) AFTER the actor's role is re-read and the
+ * allowance lock is held, so a `ZodError` (400) is charged like any other 400, while a caller who isn't allowed to
+ * write at all (401/403) never gets that far.
  */
 export async function writeTx<T>(actor: Actor, capability: Capability, work: (tx: Tx) => Promise<T>): Promise<T> {
   try {
@@ -26,7 +31,7 @@ export async function writeTx<T>(actor: Actor, capability: Capability, work: (tx
       return work(tx);
     });
   } catch (err) {
-    if (err instanceof HttpError && CHARGED_REFUSALS.has(err.status)) {
+    if ((err instanceof HttpError && CHARGED_REFUSALS.has(err.status)) || err instanceof ZodError) {
       await db().transaction((tx) => consumeRate(tx, actor.id, "api_write", LIMITS.writesPerHour, TOO_MANY_WRITES));
     }
     throw err;
