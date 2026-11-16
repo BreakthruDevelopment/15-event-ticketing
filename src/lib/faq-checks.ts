@@ -41,6 +41,10 @@ export const QUOTE_HEADER = "From the organiser's FAQ:";
 export const NOT_IN_FAQ_TEXT = "The organiser's FAQ doesn't cover that.";
 
 const stripNul = (s: string) => s.replace(/\0/g, "");
+// TAB, LF and CR: the URL parser DELETES them ("evil<TAB>.test" resolves to evil.test) while a token scan splits on them.
+// They are collapsed to a single space BEFORE any check, and the collapsed text is what is checked AND served, so the two
+// can never disagree (re-scanning a deleted copy instead would glue honest sentences together).
+const collapseBreaks = (s: string) => s.replace(/[\t\r\n]+/g, " ");
 
 // One view per purpose. Each folds only what its purpose licenses, so a fold made for one purpose can never erase a
 // difference another purpose depends on:
@@ -68,9 +72,23 @@ function foldDigit(c: string): string {
   return String((cp - start) % 10);
 }
 
-/** The numeric view: NFKC (fullwidth, superscript and circled digits, compatibility currency signs), every `\p{Nd}` digit folded to ASCII, format characters dropped. */
+// Roman-numeral characters (U+2160..2188) are numerals, not digits: no view turns them into numbers. NFKC would turn them
+// into plain letters (and the small forms U+2170..217F into lowercase ones), erasing the evidence the numeral scan needs,
+// so the numeric view FIRST wraps each in markers carrying its uppercase letters, and `numberTokens` reads the markers.
+const ROMAN_OPEN = "\ue000";
+const ROMAN_CLOSE = "\ue001";
+
+/**
+ * The numeric view: Roman-numeral characters marked (see above), then NFKC (fullwidth, superscript and circled digits,
+ * compatibility currency signs), every `\p{Nd}` digit folded to ASCII, format characters dropped.
+ */
 export function numericView(raw: string): NumericText {
-  return raw.normalize("NFKC").replace(/\p{Nd}/gu, foldDigit).replace(/\p{Cf}/gu, "") as NumericText;
+  return raw
+    .replace(/[\ue000\ue001]/g, " ") // the markers' own code points cannot be forged by the text
+    .replace(/[\u2160-\u2188]/g, (c) => `${ROMAN_OPEN}${c.normalize("NFKC").toUpperCase()}${ROMAN_CLOSE}`)
+    .normalize("NFKC")
+    .replace(/\p{Nd}/gu, foldDigit)
+    .replace(/\p{Cf}/gu, "") as NumericText;
 }
 
 /** The as-written view: nothing is folded. */
@@ -94,7 +112,8 @@ const TLD = String.raw`[\p{L}\p{M}\p{Cf}]{2,}`;
 const DOMAIN = `(?:${LABEL}[${DOT}])+${TLD}`;
 const EMAIL = new RegExp(`[^${DELIM}]+@${DOMAIN}`, "giu");
 const EMAIL_WHOLE = new RegExp(`^[^${DELIM}]+@${DOMAIN}$`, "iu");
-const PLAIN_HOST = new RegExp(`^(?:[^${DELIM}${DOT}]|[${DOT}])+$`, "u");
+// A plain host has no percent-escape: the URL parser DECODES "%2e" to ".", so such a host keeps its raw text (never equal to another).
+const PLAIN_HOST = new RegExp(`^(?:[^${DELIM}${DOT}%]|[${DOT}])+$`, "u");
 // Any "scheme://" starts a link, glued to a preceding word or not, a dotless host ("http://evil") or not; "www." too.
 const LINK_START = /(?:[a-z][a-z0-9+.-]*:\/\/|\bwww\.)\S*/i;
 const DOMAIN_START = new RegExp(`^${DOMAIN}`, "iu");
@@ -288,8 +307,20 @@ export function numberTokens(input: NumericText, ignore: Set<string> = new Set()
   const out = new Set<string>();
   // Numerals the numeric view cannot turn into digits (Roman numerals, CJK ideographic numerals) are not "out of scope"
   // but REFUSED: each must appear as itself in the source, so "十 dollars" can never pass for a price it is not.
-  for (const m of input.matchAll(/(?<![\p{L}\p{N}])[IVXLCDM]+(?![\p{L}\p{N}])/gu)) if (m[0] !== "I" && ROMAN_NUMERAL.test(m[0])) out.add(`r:${m[0]}`);
-  let s: string = input.toLowerCase();
+  // 1. numeral CHARACTERS (marked by the numeric view, in any case, glued to anything): every one counts, a lone "I" too.
+  const marker = new RegExp(`${ROMAN_OPEN}([IVXLCDM]+)${ROMAN_CLOSE}`, "g");
+  for (const m of input.matchAll(marker)) out.add(`r:${m[1]}`);
+  const plain = input.replace(marker, " ") as string;
+  // 2. ASCII capitals standing alone, as written ("X dollars"): a lone "I" is the pronoun.
+  for (const m of plain.matchAll(/(?<![\p{L}\p{N}])[IVXLCDM]+(?![\p{L}\p{N}])/gu)) if (m[0] !== "I" && ROMAN_NUMERAL.test(m[0])) out.add(`r:${m[0]}`);
+  // 3. lowercase ASCII only where it is used AS a number, not as a word ("a mix of demos", "30 cm"): straight after a
+  //    currency sign, or straight before a currency word or am/pm ("iv dollars", "at ix pm").
+  const lower = new RegExp(`(?:(?<=[$€£¥₹]\\s?)([ivxlcdm]+)(?![\\p{L}\\p{N}])|(?<![\\p{L}\\p{N}])([ivxlcdm]+)(?=\\s?(?:${Object.keys(CURRENCY_WORD).join("|")}|[ap]\\.?m)(?![\\p{L}\\p{N}])))`, "gu");
+  for (const m of plain.matchAll(lower)) {
+    const t = (m[1] ?? m[2]).toUpperCase();
+    if (t !== "I" && ROMAN_NUMERAL.test(t)) out.add(`r:${t}`);
+  }
+  let s: string = plain.toLowerCase();
   for (const id of ignore) s = s.replace(new RegExp(`\\b${id.toLowerCase()}\\b`, "g"), " ");
   // Calendar words are facts too: a month, a weekday and a month-and-day pair must each appear in a cited source
   // ("January 3" against a source that says "December 3" is a different date; so is "Friday" for "Thursday").
@@ -349,8 +380,8 @@ export function unsupportedParts(answer: string, sourceText: string, citedIds: s
   const flags: string[] = [];
 
   // Each purpose gets its own view of each text, once: links and emails as written, numbers and phones in the numeric view.
-  const a = findLinksAndEmails(asWritten(answer));
-  const s = findLinksAndEmails(asWritten(sourceText));
+  const a = findLinksAndEmails(asWritten(collapseBreaks(answer)));
+  const s = findLinksAndEmails(asWritten(collapseBreaks(sourceText)));
   if (a.emails.some((e) => !s.emails.some((x) => x === e))) flags.push("unsupported_email");
   const srcLinks = s.links.map(parseLink);
   if (a.links.some((l) => !srcLinks.some((x) => linkMatches(parseLink(l), x)))) flags.push("unsupported_link");
@@ -397,7 +428,7 @@ export function checkFaqAnswer(output: ModelOutput, sources: SourceMap): Checked
     return { status: "not_in_faq", mode: "model", answer: null, citations: [], flags: uniqueFlags() };
   }
 
-  const answer = stripNul(output.answer).trim();
+  const answer = collapseBreaks(stripNul(output.answer)).trim();
   if (!answer) {
     flags.push("empty_answer");
     return { status: "answered", mode: "quoted", answer: null, citations, flags: uniqueFlags() };

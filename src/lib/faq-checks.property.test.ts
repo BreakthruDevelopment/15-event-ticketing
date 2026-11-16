@@ -41,7 +41,8 @@ for (const nu of Intl.supportedValuesOf("numberingSystem")) {
   const g = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => f.format(n));
   if (g.every((x) => /^\p{Nd}$/u.test(x))) g.forEach((x, n) => DIGIT_OF.set(x, String(n))); // decimal-digit systems only
 }
-const isIgnorable = (cp: number) => (cp >= 0x200b && cp <= 0x200f && cp !== 0x200c && cp !== 0x200d) || cp === 0xad || cp === 0xfeff || cp === 0x2060 || (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069);
+// The URL parser (WHATWG "remove all ASCII tab or newline") also deletes TAB, LF and CR anywhere in a host.
+const isIgnorable = (cp: number) => cp === 0x09 || cp === 0x0a || cp === 0x0d || (cp >= 0x200b && cp <= 0x200f && cp !== 0x200c && cp !== 0x200d) || cp === 0xad || cp === 0xfeff || cp === 0x2060 || (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069);
 
 function hostView(s: string): string {
   let out = "";
@@ -57,12 +58,35 @@ function numView(s: string): string {
   for (const ch of s) {
     const cp = ch.codePointAt(0) as number;
     if (DIGIT_OF.has(ch)) out += DIGIT_OF.get(ch);
-    else if (!isIgnorable(cp) && cp !== 0x200c && cp !== 0x200d) out += ch;
+    else if ((!isIgnorable(cp) || cp === 0x09 || cp === 0x0a || cp === 0x0d) && cp !== 0x200c && cp !== 0x200d) out += ch;
   }
   return out.normalize("NFKC"); // case kept: Roman numerals are capitals
 }
 
 const CJK_NUMERALS = "〇零一二三四五六七八九十百千万萬億亿兆壹貳贰參叁肆伍陸陆柒捌玖拾佰仟廿卅";
+/**
+ * Every Roman numeral a text uses, as uppercase letters, read from the RAW text (NFKC would turn the numeral characters into
+ * ordinary letters, lowercase for the small forms, before anyone could see them):
+ *  - each numeral CHARACTER (U+2160..U+2188), any case, glued to anything;
+ *  - a standalone ASCII capital numeral ("X dollars"); a lone "I" is the pronoun;
+ *  - a lowercase ASCII word only where it is used as a number: right after a currency sign, or right before a currency word
+ *    or am/pm ("iv dollars"). Elsewhere it is a word ("mix", "cm").
+ */
+function romans(raw: string): string[] {
+  const out: string[] = [];
+  for (const ch of raw) {
+    const cp = ch.codePointAt(0) as number;
+    if (cp >= 0x2160 && cp <= 0x2188) out.push(ch.normalize("NFKC").toUpperCase());
+  }
+  for (const m of raw.matchAll(/(?<![\p{L}\p{N}])[IVXLCDM]+(?![\p{L}\p{N}])/gu)) if (isRoman(m[0])) out.push(m[0]);
+  const unitWords = "dollars?|usd|euros?|eur|pounds?|gbp|yen|bucks?|francs|pesos|yuan|rupees?|rmb";
+  for (const m of raw.matchAll(new RegExp(`(?<=[$\u20ac\u00a3\u00a5\u20b9]\\s?)([ivxlcdm]+)(?![\\p{L}\\p{N}])|(?<![\\p{L}\\p{N}])([ivxlcdm]+)(?=\\s?(?:${unitWords}|[ap]\\.?m)(?![\\p{L}\\p{N}]))`, "gu"))) {
+    const t = (m[1] ?? m[2]).toUpperCase();
+    if (isRoman(t)) out.push(t);
+  }
+  return out;
+}
+
 // A Roman numeral by arithmetic: value it, write that value back canonically, and compare.
 function isRoman(t: string): boolean {
   const V: Record<string, number> = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
@@ -136,9 +160,8 @@ function ungrounded(answer: string, source: string): string[] {
   const sourceRuns = new Set(ns.match(/[0-9]+/g) ?? []);
   for (const run of na.match(/[0-9]+/g) ?? []) if (!sourceRuns.has(run)) found.push(`#${run}`);
   // numerals that are not digits: a Roman or CJK numeral the source does not itself contain
-  const romans = (t: string) => (t.match(/(?<![\p{L}\p{N}])[IVXLCDM]+(?![\p{L}\p{N}])/gu) ?? []).filter(isRoman);
-  const sourceRomans = new Set(romans(ns));
-  for (const r of romans(na)) if (!sourceRomans.has(r)) found.push(`R${r}`);
+  const sourceRomans = new Set(romans(source));
+  for (const r of romans(answer)) if (!sourceRomans.has(r)) found.push(`R${r}`);
   for (const ch of na) if (CJK_NUMERALS.includes(ch) && !ns.includes(ch)) found.push(`N${ch}`);
   return found;
 }
@@ -157,6 +180,7 @@ const mapFor = (text: string): SourceMap => new Map([["F1", { id: "F1", kind: "f
 
 const HOSTS = [
   "tickets2026.example", "tickets\u0662026.example", "tickets\u0968026.example", "tickets\u4e8c026.example", "tickets\u2161026.example", "tickets\u2461026.example", "ticketsII026.example", "tickets\u200b2026.example", "tickets2026\u3002example", "\uff54ickets2026.example",
+  "evil\t.test", "evil.\ttest", "evil\n.test", "evil.test\r", "tickets.\texample.com", "tickets.example\n.com", "evil.te\r\nst",
   "evil.test", "Evil.TEST", "evil.test.", "tickets.example.com", "TICKETS.example.com", "www.tickets.example.com", "tickets.example.com.evil.test",
   "evil-tickets.example.com", "ticket5.example.com", "xn--e1aybc.xn--p1ai", "тест.рф", "bücher.example", "例え.jp", "раураl.com",
   "evil。test", "evil．test", "evil｡test", "evil​.test", "evil.te­st", "ev⁠il.test", "evil.﻿ test".replace(" ", ""),
@@ -182,6 +206,7 @@ const ATOMS = [
   "Doors open at 9:30 PM CST.", "Doors open at 9:45 PM CST.", "Doors open at 19:30 CST.", "Doors open at 9:30 AM CST.",
   "Doors open on December 4.", "Doors open on December 5.", "Doors open on December 14.", "Doors open on December 4, 2026.",
   "Call 512-555-9999.", "Call 512-555-9998.", "Call (512) 555-9999.", "Call 512 555 9999.", "Refunds up to 2 hours.", "Refunds up to 3 hours.", "Refunds up to 20 hours.", "Refunds up to 0 hours.",
+  "Parking is $\u2179.", "Parking is $\u2173.", "Parking is $\u217b.", "Parking is $\u2170\u2179.", "Doors open at \u2173 pm.", "Parking is iv dollars.", "Parking is $iv.", "Doors open at ix pm.", "We have a mix of demos.", "There is 30 cm of room.",
   "Tickets are X dollars.", "Parking is $\u2169.", "Tickets are \u5341 dollars.", "Tickets are \u58f9\u4f70 dollars.", "The XIV Summit.", "The XV Summit.", "Parking is $\u4e00\u3007.", "I think so, and see C or D.",
 ];
 function inScript(text: string, r: () => number): string {
@@ -221,10 +246,10 @@ describe("grounding property: an ungrounded domain, email or host never passes a
     for (let i = 0; i < runs; i++) {
       const answer = answerFrom(r);
       const source = SOURCES[i % SOURCES.length];
-      if (ungrounded(answer, source).length === 0) continue;
-      hostile++;
+      if (ungrounded(answer, source).length > 0) hostile++; // sanity: how many generated answers are hostile at all
+      // What matters is what is SERVED: the text of a "model" answer (which may differ from the input, e.g. line breaks).
       const out = checkFaqAnswer({ status: "answered", answer, citations: ["F1"] }, mapFor(source));
-      if (out.mode === "model") failures.push(`${JSON.stringify(answer)} against source #${i % SOURCES.length}`);
+      if (out.mode === "model" && out.answer !== null && ungrounded(out.answer, source).length > 0) failures.push(`${JSON.stringify(answer)} -> ${JSON.stringify(out.answer)} against source #${i % SOURCES.length}`);
     }
     expect(failures.slice(0, 15), `${failures.length} bypasses`).toEqual([]);
     expect(hostile).toBeGreaterThan(runs / 2); // the generator really is producing hostile answers

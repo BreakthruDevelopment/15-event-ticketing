@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { type SourceMap, asWritten, checkFaqAnswer, findLinksAndEmails as findLinksAndEmailsView, findPhones as findPhonesView, numberTokens as numberTokensView, numericView, quotedText } from "./faq-checks";
 
@@ -461,6 +461,57 @@ describe("one view per purpose", () => {
     expect(r("Buy at https://tickets.example\u200b.com/VIP?id=12 today.").mode).toBe("model"); // the host view ignores it
   });
 
+  it("Roman numerals survive NFKC: the small forms, glued forms, and lowercase words used as numbers are refused", () => {
+    const five: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nParking is $5. We have a mix of demos, and 30 cm of room." }]]);
+    const r = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, five);
+    for (const bad of [
+      "Parking is $\u2179.", // small roman ten
+      "Parking is $\u2173.", // small roman four
+      "Parking is $\u217b.", // small roman twelve
+      "Parking is $\u2170\u2179.", // small roman nine, two characters
+      "Parking is $\u2169dollars.", // glued to a letter
+      "Doors open at \u2173 pm.",
+      "Parking is iv dollars.",
+      "Parking is $iv.",
+      "Doors open at ix pm.",
+      "Parking is $\u2160.", // a lone numeral CHARACTER one is still a numeral
+    ]) {
+      expect(r(bad), bad).toMatchObject({ mode: "quoted", answer: null, flags: expect.arrayContaining(["unsupported_number"]) });
+    }
+    // lowercase words that merely look like numerals are ordinary words
+    for (const good of ["We have a mix of demos.", "There is 30 cm of room.", "Parking is $5, and I think so."]) expect(r(good).mode, good).toBe("model");
+    // verbatim in the source, a numeral is the source's own word
+    const src: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nBuy iv dollars of fuel at $\u2179." }]]);
+    expect(checkFaqAnswer({ status: "answered", answer: "Buy iv dollars of fuel at $\u2179.", citations: ["F1"] }, src).mode).toBe("model");
+  });
+
+  it("TAB, LF and CR inside a host cannot hide a link: they are collapsed to a space and that text is what is served", () => {
+    const m: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nBuy at https://tickets.example.com/EventPass today." }]]);
+    const r = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, m);
+    for (const sep of ["\t", "\n", "\r", "\r\n", "\t\n\t"]) {
+      const out = r(`Buy at evil${sep}.test/x today.`);
+      // collapsed: "evil .test/x" has no domain, and the served text really is that text
+      if (out.mode === "model") expect(out.answer).toBe("Buy at evil .test/x today.");
+      // and a break after a grounded link is just a space
+      expect(r(`Buy at https://tickets.example.com/EventPass${sep}today.`).answer, JSON.stringify(sep)).toBe("Buy at https://tickets.example.com/EventPass today.");
+      // a break inside a TLD leaves "evil.te" as a domain of its own, which the source lacks
+      expect(r(`Buy at evil.te${sep}st/x today.`).mode, JSON.stringify(sep)).toBe("quoted");
+    }
+    // honest multi-line answers are not damaged
+    expect(r("Buy at https://tickets.example.com/EventPass\ntoday.").answer).toBe("Buy at https://tickets.example.com/EventPass today.");
+    expect(r("Buy at\r\nhttps://tickets.example.com/EventPass today.").mode).toBe("model");
+    // a link broken by a line break is checked as it will be read
+    expect(r("Buy at https://tickets.example.com/Event\nPass today.")).toMatchObject({ mode: "quoted", flags: expect.arrayContaining(["unsupported_link"]) });
+  });
+
+  it("a percent-escape in a host is not decoded into equality: the parser would turn %2e into a dot", () => {
+    const m: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nBuy at https://tickets.example.com/vip today." }]]);
+    const r = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, m);
+    expect(r("Buy at https://tickets.example.com/vip today.").mode).toBe("model");
+    expect(r("Buy at https://tickets%2eexample.com/vip today.")).toMatchObject({ mode: "quoted", flags: expect.arrayContaining(["unsupported_link"]) });
+    expect(r("Buy at https://tickets.example%2ecom/vip today.").mode).toBe("quoted");
+  });
+
   it("each scanner accepts only its own view, and nothing else folds text", () => {
     // compile-time: a raw string is a type error (checked by `pnpm typecheck`)
     // @ts-expect-error numeric scanners accept the numeric view only
@@ -478,10 +529,15 @@ describe("one view per purpose", () => {
     for (const fn of ["findPhones", "numberTokens"]) expect(code, fn).toMatch(new RegExp(`export function ${fn}\\(\\w+: NumericText`));
     expect(code.match(/as NumericText/g)).toHaveLength(1);
     expect(code.match(/as WrittenText/g)).toHaveLength(1);
-    expect(code.match(/\.normalize\(/g)).toHaveLength(1);
-    expect(code.match(/\\p\{Cf\}\/gu/g)).toHaveLength(1);
+    // every normalisation call lives inside the numeric view, and nowhere else
     const view = code.slice(code.indexOf("export function numericView"), code.indexOf("export function asWritten"));
-    expect(view).toContain(".normalize(");
+    expect(code.match(/\.normalize\(/g)?.length).toBe(view.match(/\.normalize\(/g)?.length);
+    expect(code.match(/\\p\{Cf\}\/gu/g)).toHaveLength(1);
     expect(view).toContain("as NumericText");
+    // and no other file can mint a view: a cast into either type anywhere else in src/ is a failure
+    const walk = (dir: URL): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(new URL(`${e.name}/`, dir)) : /\.tsx?$/.test(e.name) ? [new URL(e.name, dir).pathname] : []));
+    const offenders = walk(new URL("../", import.meta.url)).filter((f) => !f.endsWith("/lib/faq-checks.ts") && !f.endsWith("/lib/faq-checks.test.ts") && /\bas (unknown as )?(NumericText|WrittenText)\b/.test(readFileSync(f, "utf8")));
+    expect(offenders).toEqual([]);
   });
 });
