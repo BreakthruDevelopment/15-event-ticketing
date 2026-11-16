@@ -179,7 +179,12 @@ export async function acceptInvite(actor: Actor | null, input: unknown) {
     // answers the same and can't consume the invite and restore access.
     const noopOp = uuidFrom(`${d.toString("hex")}:${actor.id}`);
     const [noop] = await tx.select({ id: schema.opLedger.clientOpId }).from(schema.opLedger).where(and(eq(schema.opLedger.actorId, actor.id), eq(schema.opLedger.clientOpId, noopOp)));
-    if (noop) return { eventId: ev.id, title: ev.title, replayed: true };
+    if (noop) {
+      // A replay answers 200 only while they still hold the staff row; after a removal it is the invite 404.
+      const [held] = await tx.select({ userId: S.userId }).from(S).where(and(eq(S.eventId, ev.id), eq(S.userId, actor.id)));
+      if (!held) throw noInvite();
+      return { eventId: ev.id, title: ev.title, replayed: true };
+    }
     // Only while the invite is still open: a used invite takes the replay path below.
     const [stillOpen] = await tx.select({ id: I.id }).from(I).where(and(eq(I.id, peek.id), openInvite()));
     const [already] = stillOpen ? await tx.select({ userId: S.userId }).from(S).where(and(eq(S.eventId, ev.id), eq(S.userId, actor.id))) : [];

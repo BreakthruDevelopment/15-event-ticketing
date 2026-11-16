@@ -283,7 +283,7 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       const t2 = tokenOf(second.link);
       await expect(ST.acceptInvite(u, { token: t2 })).resolves.toMatchObject({ replayed: true });
       await ST.removeStaff(orgA, e.id, u.id, op());
-      await expect(ST.acceptInvite(u, { token: t2 })).resolves.toMatchObject({ replayed: true });
+      await expect(ST.acceptInvite(u, { token: t2 })).rejects.toMatchObject({ status: 404 });
       await expect(AC.resolveDoorAccess(D, u, e.id)).rejects.toMatchObject({ status: 404 });
       const [row] = await sql`select used_at from staff_invite where id = ${second.id}`;
       expect(row.used_at).toBeNull();
@@ -556,11 +556,31 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       await fillRate(sql, o.id, 299);
       await expect(EV.updateEvent(o, e.id, { version: e.version, venueName: "Spent the last one" })).resolves.toBeTruthy();
       await expect(EV.updateEvent(o, e.id, { version: e.version + 1, venueName: "Over" })).rejects.toMatchObject({ status: 429 });
-      // A refused write (here a stale version) rolls its attempt back, so it doesn't eat the allowance.
+    });
+
+    it("a refused write (stale version, foreign id, bad invite token) spends one attempt, and 429s once the allowance is full", async () => {
+      const o = await makeUser(sql, P, "refused", "organizer");
+      const s = await makeUser(sql, P, "refusedstaff", "user");
+      const e = await publish(o, eventInput({ title: "Refused" }));
+      const count = async (id: string) => (await sql`select count(*)::int as n from rate_event where user_id = ${id} and kind = 'api_write'`)[0].n as number;
+
       await fillRate(sql, o.id, 100);
-      await expect(EV.updateEvent(o, e.id, { version: 1, venueName: "stale" })).rejects.toMatchObject({ status: 409 });
-      const [{ n }] = await sql`select count(*)::int as n from rate_event where user_id = ${o.id} and kind = 'api_write'`;
-      expect(n).toBe(100);
+      await expect(EV.updateEvent(o, e.id, { version: 99, venueName: "stale" })).rejects.toMatchObject({ status: 409 });
+      expect(await count(o.id)).toBe(101);
+      await expect(EV.updateEvent(o, crypto.randomUUID(), { version: 1, venueName: "ghost" })).rejects.toMatchObject({ status: 404 });
+      expect(await count(o.id)).toBe(102);
+
+      await fillRate(sql, o.id, 299);
+      await expect(EV.updateEvent(o, e.id, { version: 99, venueName: "stale" })).rejects.toMatchObject({ status: 409 });
+      expect(await count(o.id)).toBe(300);
+      await expect(EV.updateEvent(o, e.id, { version: 99, venueName: "stale" })).rejects.toMatchObject({ status: 429 });
+      expect(await count(o.id)).toBe(300);
+
+      // Bad invite tokens spend too, and end in 429.
+      await fillRate(sql, s.id, 298);
+      for (let i = 0; i < 2; i++) await expect(ST.acceptInvite(s, { token: `guess${i}`.padEnd(22, "x") })).rejects.toMatchObject({ status: 404 });
+      expect(await count(s.id)).toBe(300);
+      await expect(ST.acceptInvite(s, { token: "guessxxxxxxxxxxxxxxxxx" })).rejects.toMatchObject({ status: 429 });
     });
   });
 });

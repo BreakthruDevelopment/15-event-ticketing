@@ -131,7 +131,8 @@ describe.skipIf(!url)("events (Postgres)", () => {
     it("keeps the 20-event cap exact under parallel creates, and a replay still works at the cap", async () => {
       const o = await makeUser(sql, P, "capper", "organizer");
       const ops = Array.from({ length: 25 }, () => crypto.randomUUID());
-      const results = await Promise.allSettled(ops.map((clientOpId) => EV.createEvent(o, eventInput({ clientOpId }))));
+      const inputs = ops.map((clientOpId) => eventInput({ clientOpId }));
+      const results = await Promise.allSettled(inputs.map((i) => EV.createEvent(o, i)));
       const ok = results.filter((r) => r.status === "fulfilled");
       const refused = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
       expect(ok).toHaveLength(20);
@@ -140,7 +141,10 @@ describe.skipIf(!url)("events (Postgres)", () => {
       const [{ n }] = await sql`select count(*)::int as n from event where organizer_id = ${o.id}`;
       expect(n).toBe(20);
       const firstOp = ops.find((_, i) => results[i].status === "fulfilled")!;
-      await expect(EV.createEvent(o, eventInput({ clientOpId: firstOp }))).resolves.toMatchObject({ created: false });
+      const firstIdx = ops.indexOf(firstOp);
+      await expect(EV.createEvent(o, inputs[firstIdx])).resolves.toMatchObject({ created: false });
+      // The same op id with a different body is refused, not answered with the first event.
+      await expect(EV.createEvent(o, { ...inputs[firstIdx], title: "A different event" })).rejects.toMatchObject({ status: 409, code: "op_id_reused" });
       // Deleting one frees a slot.
       const any = (await EV.listMyEvents(o))[0];
       await EV.deleteEvent(o, any.id);
@@ -208,10 +212,13 @@ describe.skipIf(!url)("events (Postgres)", () => {
       const err = await EV.updateEvent(org, e.id, { version: 1, startsAt: later, endsAt: new Date(e.endsAt.getTime() + 13 * 3_600_000).toISOString() }).catch((x) => x);
       // registration_closes_at stayed at the old start, which is fine (before the end), so this one succeeds...
       expect(err.version).toBe(2);
+      // ...and a check-in opening left at its default follows the start (3 h before it).
+      expect(err.startsAt.getTime() - err.checkinOpensAt.getTime()).toBe(3 * 3_600_000);
       // ...but an end before the stored check-in opening is refused.
       const bad = await EV.updateEvent(org, e.id, { version: 2, endsAt: new Date(e.startsAt.getTime() + 1000).toISOString() }).catch((x) => x);
-      // Moving the start so far that the stored check-in opening is over 24 h earlier is a 400 too.
-      const far = await EV.updateEvent(org, e.id, { version: 2, startsAt: new Date(e.startsAt.getTime() + 48 * 3_600_000).toISOString(), endsAt: new Date(e.startsAt.getTime() + 49 * 3_600_000).toISOString() }).catch((x) => x);
+      // A custom check-in opening doesn't follow: moving the start so far that it is over 24 h earlier is a 400.
+      const custom = await EV.updateEvent(org, e.id, { version: 2, checkinOpensAt: new Date(err.startsAt.getTime() - 2 * 3_600_000).toISOString() });
+      const far = await EV.updateEvent(org, e.id, { version: custom.version, startsAt: new Date(e.startsAt.getTime() + 72 * 3_600_000).toISOString(), endsAt: new Date(e.startsAt.getTime() + 73 * 3_600_000).toISOString() }).catch((x) => x);
       expect(far.status).toBe(400);
       expect(bad.status === 400 || bad.name === "ZodError").toBe(true);
     });
@@ -321,6 +328,10 @@ describe.skipIf(!url)("events (Postgres)", () => {
     });
 
     it("refuses a check-in opening more than 24 hours before the start (400), on create and on update", async () => {
+      const base = eventInput({ title: "Early checkin on create" });
+      const startMs = new Date(base.startsAt as string).getTime();
+      await expect(EV.createEvent(org, { ...base, checkinOpensAt: new Date(startMs - 25 * 3_600_000).toISOString() })).rejects.toMatchObject({ status: 400 });
+      await expect(EV.createEvent(org, { ...base, clientOpId: crypto.randomUUID(), checkinOpensAt: new Date(startMs - 23 * 3_600_000).toISOString() })).resolves.toMatchObject({ created: true });
       const e = (await EV.createEvent(org, eventInput({ title: "Early checkin" }))).event;
       const early = new Date(e.startsAt.getTime() - 25 * 3_600_000).toISOString();
       const ok = new Date(e.startsAt.getTime() - 23 * 3_600_000).toISOString();

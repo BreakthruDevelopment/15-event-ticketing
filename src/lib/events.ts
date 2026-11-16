@@ -219,7 +219,7 @@ export async function createEvent(actor: Actor | null, input: unknown): Promise<
   // The op ledger outlives the event: a late retry of a create whose event was deleted since returns 409 `event_deleted`
   // instead of making a new draft.
   const out = await writeTx(actor, "event:manage", (tx) =>
-    withOp(tx, actor.id, { kind: "event-create", clientOpId: data.clientOpId, payload: "create" }, async () => {
+    withOp(tx, actor.id, { kind: "event-create", clientOpId: data.clientOpId, payload: JSON.stringify(data) }, async () => {
       const [{ mine }] = await tx.select({ mine: count() }).from(E).where(eq(E.organizerId, actor.id));
       if (mine >= LIMITS.eventsPerOrganizer) {
         throw new CodedConflictError("event_limit", `You can have at most ${LIMITS.eventsPerOrganizer} events. Delete a draft or a cancelled event first.`);
@@ -287,7 +287,10 @@ export async function updateEvent(actor: Actor | null, rawId: string, input: unk
       endsAt: data.endsAt ?? cur.endsAt,
       doorsAt: data.doorsAt === undefined ? cur.doorsAt : data.doorsAt,
       registrationClosesAt: data.registrationClosesAt ?? cur.registrationClosesAt,
-      checkinOpensAt: data.checkinOpensAt ?? cur.checkinOpensAt,
+      // Left at its default (3 h before the old start) and the start moves: it follows the start.
+      checkinOpensAt:
+        data.checkinOpensAt ??
+        (data.startsAt && cur.checkinOpensAt.getTime() === defaultTimes(cur.startsAt).checkinOpensAt.getTime() ? defaultTimes(data.startsAt).checkinOpensAt : cur.checkinOpensAt),
       maxPerRegistration: data.maxPerRegistration ?? cur.maxPerRegistration,
       contactEmail: data.contactEmail === undefined ? cur.contactEmail : data.contactEmail,
     };
