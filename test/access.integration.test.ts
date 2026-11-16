@@ -274,6 +274,19 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
   describe("accept invite: delayed retry after removal, and the door read limit", () => {
     const tokenOf = (link: string) => new URL(link).hash.slice("#t=".length);
 
+    it("an invite whose token the current key doesn't derive (secret rotated) is refused as unknown", async () => {
+      const u = await makeUser(sql, P, "rotated", "user");
+      const e = await publish(orgA, eventInput({ title: "Rotated" }));
+      const inv = await ST.createInvite(orgA, e.id, op());
+      const stale = "A".repeat(22);
+      // Simulate the rotation: the stored digest is of a token an older key made.
+      await sql`update staff_invite set token_digest = sha256(${stale}::bytea) where id = ${inv.id}`;
+      await expect(ST.acceptInvite(u, { token: stale })).rejects.toMatchObject({ status: 404 });
+      await expect(ST.acceptInvite(u, { token: tokenOf(inv.link) })).rejects.toMatchObject({ status: 404 });
+      const [row] = await sql`select used_at from staff_invite where id = ${inv.id}`;
+      expect(row.used_at).toBeNull();
+    });
+
     it("an already-staff accept is recorded: after removal a retry doesn't consume the invite or restore access", async () => {
       const u = await makeUser(sql, P, "noopretry", "user");
       const e = await publish(orgA, eventInput({ title: "Noop retry" }));

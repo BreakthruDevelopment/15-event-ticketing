@@ -169,8 +169,11 @@ export async function acceptInvite(actor: Actor | null, input: unknown) {
   const { token } = inviteTokenInput.parse(input);
   const d = digest(token);
   const out = await writeTx(actor, "staff-invite:accept", async (tx) => {
-    const [peek] = await tx.select({ id: I.id, eventId: I.eventId }).from(I).where(eq(I.tokenDigest, d));
+    const [peek] = await tx.select({ id: I.id, eventId: I.eventId, clientOpId: I.clientOpId }).from(I).where(eq(I.tokenDigest, d));
     if (!peek) throw noInvite();
+    // The token must still be the one the CURRENT key derives for this invite: after `BETTER_AUTH_SECRET` is rotated
+    // every open invite fails here, even though its digest is still stored.
+    if (!digest(inviteToken(peek.eventId, peek.clientOpId)).equals(d)) throw noInvite();
     // Event row first: the same order organiser writes use, so an accept can't deadlock a revoke or an invite.
     const [ev] = await tx.select({ id: E.id, title: E.title, organizerId: E.organizerId, status: E.status, hiddenAt: E.hiddenAt }).from(E).where(eq(E.id, peek.eventId)).for("update");
     if (!ev || ev.organizerId === actor.id || ev.status === "cancelled" || ev.hiddenAt) throw noInvite();
