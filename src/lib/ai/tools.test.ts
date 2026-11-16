@@ -330,7 +330,7 @@ describe("generate() with tools", () => {
     const { tool } = items();
     const base = { task: "items-assistant", system: "s", schema: answer, tools: [tool] };
     const bad = async (extra: object) =>
-      expect(generate({ ...base, ...extra } as never)).rejects.toMatchObject({ kind: "input_rejected" });
+      expect(generate({ ...base, ...extra } as unknown as Parameters<typeof generate>[0])).rejects.toMatchObject({ kind: "input_rejected" });
     await bad({});
     await bad({ prompt: "p", messages: [{ role: "user", content: "p" }] });
     await bad({ messages: [] });

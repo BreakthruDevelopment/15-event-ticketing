@@ -10,7 +10,15 @@
  *     phones by their digits).
  * If 2 or 3 fails the answer becomes `quoted`: the cited sources' own text, verbatim, headed "From the organiser's FAQ:".
  * Pure: no database, no model.
+ *
+ * No list of "the numerals / invisible characters / currencies we know about" lives here. Each is DERIVED: numerals from the
+ * Unicode Character Database (`unicode-derived.ts`, generated table), characters a host drops from the URL parser itself, and
+ * money from ICU's currency data and `\p{Sc}` (`currency.ts`). A hand-written list can only be as good as its author's last
+ * idea; the property test (`faq-checks.property.test.ts`) derives its oracle from the same authorities separately.
  */
+
+import { CURRENCY_SIGN, currencyOfSign, currencyOfWord, currencyWordAlt } from "./currency";
+import { classOf, hasNumericValue, parserDeletedClass, parserStrippedClass } from "./unicode-derived";
 
 export type Source = {
   id: string;
@@ -44,7 +52,9 @@ const stripNul = (s: string) => s.replace(/\0/g, "");
 // TAB, LF and CR: the URL parser DELETES them ("evil<TAB>.test" resolves to evil.test) while a token scan splits on them.
 // They are collapsed to a single space BEFORE any check, and the collapsed text is what is checked AND served, so the two
 // can never disagree (re-scanning a deleted copy instead would glue honest sentences together).
-const collapseBreaks = (s: string) => s.replace(/[\t\r\n]+/g, " ");
+// "TAB, LF and CR" is not written here: it is the set of characters the URL parser itself strips (`unicode-derived.ts`).
+let breaksRe: RegExp | undefined;
+const collapseBreaks = (s: string) => s.replace((breaksRe ??= new RegExp(`[${parserStrippedClass()}]+`, "gu")), " ");
 
 // One view per purpose. Each folds only what its purpose licenses, so a fold made for one purpose can never erase a
 // difference another purpose depends on:
@@ -72,9 +82,10 @@ function foldDigit(c: string): string {
   return String((cp - start) % 10);
 }
 
-// Roman-numeral characters (U+2160..2188) are numerals, not digits: no view turns them into numbers. NFKC would turn them
-// into plain letters (and the small forms U+2170..217F into lowercase ones), erasing the evidence the numeral scan needs,
-// so the numeric view FIRST wraps each in markers carrying its uppercase letters, and `numberTokens` reads the markers.
+// Roman-numeral characters (the Nl characters that NFKC turns into the letters I V X L C D M: U+2160..217F and kin) are
+// numerals, not digits: no view turns them into numbers. NFKC would turn them into plain letters (the small forms into
+// lowercase ones), erasing the evidence the numeral scan needs, so the numeric view FIRST wraps each in markers carrying its
+// uppercase letters, and `numberTokens` reads the markers.
 const ROMAN_OPEN = "\ue000";
 const ROMAN_CLOSE = "\ue001";
 
@@ -83,13 +94,27 @@ const ROMAN_CLOSE = "\ue001";
  * compatibility currency signs), every `\p{Nd}` digit folded to ASCII, format characters dropped.
  */
 export function numericView(raw: string): NumericText {
-  return raw
-    .replace(/[\ue000\ue001]/g, " ") // the markers' own code points cannot be forged by the text
-    .replace(/[\u2160-\u2188]/g, (c) => `${ROMAN_OPEN}${c.normalize("NFKC").toUpperCase()}${ROMAN_CLOSE}`)
-    .normalize("NFKC")
+  // Invisible characters go: every format character (Cf) and every character the URL parser deletes (variation selectors,
+  // soft hyphen...), except TAB/LF/CR, which are word breaks here.
+  invisibleRe ??= new RegExp(`[\\p{Cf}${parserDeletedClass()}]`, "gu");
+  breakRe ??= new RegExp(`^[${parserStrippedClass()}]$`, "u");
+  const keep = breakRe;
+  // NFKC, except that a currency sign NFKC would turn into letters ("₨" is "Rs", "﷼" is Arabic letters) stays the sign it is.
+  const nfkc = (text: string) =>
+    text.replace(/\p{Sc}|[^\p{Sc}]+/gu, (seg) => {
+      const n = seg.normalize("NFKC");
+      return /^\p{Sc}$/u.test(seg) && !/^\p{Sc}$/u.test(n) ? seg : n;
+    });
+  return nfkc(
+    raw
+      .replace(/[\ue000\ue001]/g, " ") // the markers' own code points cannot be forged by the text
+      .replace(/\p{Nl}/gu, (c) => (/^[ivxlcdm]+$/i.test(c.normalize("NFKC")) ? `${ROMAN_OPEN}${c.normalize("NFKC").toUpperCase()}${ROMAN_CLOSE}` : c)),
+  )
     .replace(/\p{Nd}/gu, foldDigit)
-    .replace(/\p{Cf}/gu, "") as NumericText;
+    .replace(invisibleRe, (c) => (keep.test(c) ? c : "")) as NumericText;
 }
+let invisibleRe: RegExp | undefined;
+let breakRe: RegExp | undefined;
 
 /** The as-written view: nothing is folded. */
 export function asWritten(raw: string): WrittenText {
@@ -103,8 +128,9 @@ export function asWritten(raw: string): WrittenText {
 // dashes), and the full stops (ASCII, ideographic, fullwidth, halfwidth) that separate labels. Everything else, in any
 // script, invisible characters included, is a label character: a domain is recognised BROADLY and its host is then
 // mapped by the URL parser, so a character we did not think of cannot hide one.
-// Whitespace, EXCEPT U+FEFF (JS counts the BOM as whitespace; UTS46 deletes it, so inside a host it is nothing).
-const WS = String.raw`\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000`;
+// Whitespace is JavaScript's own `\s`, read off the engine (not typed out), EXCEPT U+FEFF: JS counts the BOM as whitespace, but
+// UTS46 deletes it, so inside a host it is nothing and must not split a token.
+const WS = classOf(Array.from({ length: 0x10000 }, (_, cp) => cp).filter((cp) => cp !== 0xfeff && /\s/.test(String.fromCharCode(cp))));
 const DELIM = String.raw`${WS}/\\?#@:()<>[\]"',;*_!–—‹›‘’“”«»`;
 const DOT = String.raw`.。．｡`;
 const LABEL = `[^${DELIM}${DOT}]+`;
@@ -114,8 +140,10 @@ const EMAIL = new RegExp(`[^${DELIM}]+@${DOMAIN}`, "giu");
 const EMAIL_WHOLE = new RegExp(`^[^${DELIM}]+@${DOMAIN}$`, "iu");
 // A plain host has no percent-escape: the URL parser DECODES "%2e" to ".", so such a host keeps its raw text (never equal to another).
 const PLAIN_HOST = new RegExp(`^(?:[^${DELIM}${DOT}%]|[${DOT}])+$`, "u");
-// Any "scheme://" starts a link, glued to a preceding word or not, a dotless host ("http://evil") or not; "www." too.
-const LINK_START = /(?:[a-z][a-z0-9+.-]*:\/\/|\bwww\.)\S*/i;
+// Any "scheme://" starts a link, glued to a preceding word or not, a dotless host ("http://evil") or not; "www." too. Characters
+// the URL parser deletes may sit anywhere in the "://" ("https:<ZWSP>//localhost/admin"), so none of them hides a link start.
+let linkStartRe: RegExp | undefined;
+const linkStart = () => (linkStartRe ??= new RegExp(`[a-z][a-z0-9+.-]*[${parserDeletedClass()}]*:[${parserDeletedClass()}]*\\/[${parserDeletedClass()}]*\\/|\\bwww\\.`, "iu"));
 const DOMAIN_START = new RegExp(`^${DOMAIN}`, "iu");
 // No lookahead after the TLD: the link is sliced from the match start to the end of the token, so a lookahead could only
 // hide a domain ("evil.test-x/x#tickets.example.com/EventPass").
@@ -149,7 +177,7 @@ export function findLinksAndEmails(text: WrittenText): { emails: string[]; links
   const emails: string[] = [];
   const links: string[] = [];
   for (const raw of text.split(new RegExp(`[${WS}]+`, "u"))) {
-    const withScheme = LINK_START.exec(raw);
+    const withScheme = linkStart().exec(raw);
     if (withScheme) {
       links.push(trimTail(raw.slice(withScheme.index)));
       continue;
@@ -221,11 +249,18 @@ function linkMatches(a: ReturnType<typeof parseLink>, s: ReturnType<typeof parse
 // Number, time, price and date tokens
 
 // An amount carries its currency: "$10" and "10 dollars" are the same price, "€10" and "£10" are not ("10" alone is neither).
-const CURRENCY_SYMBOL: Record<string, string> = { "$": "usd", "€": "eur", "£": "gbp", "¥": "jpy", "₹": "inr", "₩": "krw", "₽": "rub", "₺": "try", "₪": "ils", "₫": "vnd", "₱": "php", "₦": "ngn", "฿": "thb" };
-const CURRENCY_WORD: Record<string, string> = { usd: "usd", dollar: "usd", dollars: "usd", buck: "usd", bucks: "usd", eur: "eur", euro: "eur", euros: "eur", gbp: "gbp", pound: "gbp", pounds: "gbp", jpy: "jpy", yen: "jpy", inr: "inr", rupee: "inr", rupees: "inr", cad: "cad", aud: "aud", chf: "chf", francs: "chf", mxn: "mxn", pesos: "mxn", cny: "cny", yuan: "cny", rmb: "cny" };
-const MONEY_SYMBOL = new RegExp(`([${Object.keys(CURRENCY_SYMBOL).join("")}])\\s?(\\d[\\d,]*(?:\\.\\d+)?)`, "g");
-const MONEY_SYMBOL_AFTER = new RegExp(`(\\d[\\d,]*(?:\\.\\d+)?)\\s?([${Object.keys(CURRENCY_SYMBOL).join("")}])`, "g");
-const MONEY_WORD = new RegExp(`(\\d[\\d,]*(?:\\.\\d+)?)\\s?(${Object.keys(CURRENCY_WORD).join("|")})\\b`, "g");
+// The currency table is `currency.ts`: every \p{Sc} sign and every ISO code or currency name, one table for every rule below.
+const AMOUNT = String.raw`\d+(?:,\d+)*(?:\.\d+)?`; // a trailing comma is punctuation, not part of the amount
+const MONEY_SYMBOL = new RegExp(`(${CURRENCY_SIGN})\\s?(${AMOUNT})`, "gu");
+const MONEY_SYMBOL_AFTER = new RegExp(`(${AMOUNT})\\s?(${CURRENCY_SIGN})`, "gu");
+let moneyWordRe: RegExp | undefined;
+const moneyWord = () => (moneyWordRe ??= new RegExp(`(${AMOUNT})\\s?(${currencyWordAlt()})\\b`, "g"));
+let romanContextRe: RegExp | undefined;
+const romanContext = () =>
+  (romanContextRe ??= new RegExp(
+    `(?:(?<=${CURRENCY_SIGN}\\s?)([ivxlcdm]+)(?![\\p{L}\\p{N}])|(?<![\\p{L}\\p{N}])([ivxlcdm]+)(?:(?![\\p{L}\\p{N}])(?=\\s?(?:${currencyWordAlt()})(?![\\p{L}\\p{N}]))|(?=\\s?[ap]\\.?m(?![\\p{L}\\p{N}]))))`,
+    "gu",
+  ));
 const moneyToken = (cur: string, n: string) => (cur === "usd" ? `$${canonNumber(n)}` : `c:${cur}:${canonNumber(n)}`);
 const TIME_12H = /\b(\d{1,2})(?::(\d{2}))?\s?([ap])\.?m\b\.?/g;
 const TIME_24H = /\b([01]?\d|2[0-3]):([0-5]\d)\b/g;
@@ -291,7 +326,10 @@ function numberWordsToDigits(s: string): string {
   });
 }
 
+// A comma is a thousands separator only between groups of three ("1,000"): "1,5" and "1,0" are NOT 15 and 10 (a decimal comma,
+// or digits a numeral character glued a comma onto), so they stay as written and equal only themselves.
 const canonNumber = (raw: string) => {
+  if (!/^(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$/.test(raw)) return raw;
   const n = Number(raw.replace(/,/g, ""));
   return Number.isFinite(n) ? String(n) : raw;
 };
@@ -302,7 +340,6 @@ const canonNumber = (raw: string) => {
  * citation ids to leave out (the answer may say "(F3)"; an INVENTED "E99" is not ignored).
  */
 const ROMAN_NUMERAL = /^M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/;
-const CJK_NUMERAL = /[\u3007\u96f6\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u4e07\u842c\u5104\u4ebf\u5146\u58f9\u8cb3\u8d30\u53c3\u53c1\u8086\u4f0d\u9678\u9646\u67d2\u634c\u7396\u62fe\u4f70\u4edf\u5eff\u5345]/;
 export function numberTokens(input: NumericText, ignore: Set<string> = new Set()): Set<string> {
   const out = new Set<string>();
   // Numerals the numeric view cannot turn into digits (Roman numerals, CJK ideographic numerals) are not "out of scope"
@@ -313,14 +350,15 @@ export function numberTokens(input: NumericText, ignore: Set<string> = new Set()
   const plain = input.replace(marker, " ") as string;
   // 2. ASCII capitals standing alone, as written ("X dollars"): a lone "I" is the pronoun.
   for (const m of plain.matchAll(/(?<![\p{L}\p{N}])[IVXLCDM]+(?![\p{L}\p{N}])/gu)) if (m[0] !== "I" && ROMAN_NUMERAL.test(m[0])) out.add(`r:${m[0]}`);
-  // 3. lowercase ASCII only where it is used AS a number, not as a word ("a mix of demos", "30 cm"): straight after a
-  //    currency sign, or straight before a currency word or am/pm ("iv dollars", "at ix pm").
-  const lower = new RegExp(`(?:(?<=[$€£¥₹]\\s?)([ivxlcdm]+)(?![\\p{L}\\p{N}])|(?<![\\p{L}\\p{N}])([ivxlcdm]+)(?=\\s?(?:${Object.keys(CURRENCY_WORD).join("|")}|[ap]\\.?m)(?![\\p{L}\\p{N}])))`, "gu");
-  for (const m of plain.matchAll(lower)) {
+  // 3. ASCII letters only where they are used AS a number, not as a word ("a mix of demos", "30 cm"): straight after a
+  //    currency sign, or straight before a currency word or am/pm ("iv dollars", "at ix pm"). The text is lower-cased FIRST,
+  //    so "IV USD", "Iv dollars" and "iV dollars" are the same as "iv usd"; the sign and the words are the shared table's.
+  const lowered = plain.toLowerCase();
+  for (const m of lowered.matchAll(romanContext())) {
     const t = (m[1] ?? m[2]).toUpperCase();
     if (t !== "I" && ROMAN_NUMERAL.test(t)) out.add(`r:${t}`);
   }
-  let s: string = plain.toLowerCase();
+  let s: string = lowered;
   for (const id of ignore) s = s.replace(new RegExp(`\\b${id.toLowerCase()}\\b`, "g"), " ");
   // Calendar words are facts too: a month, a weekday and a month-and-day pair must each appear in a cited source
   // ("January 3" against a source that says "December 3" is a different date; so is "Friday" for "Thursday").
@@ -338,15 +376,15 @@ export function numberTokens(input: NumericText, ignore: Set<string> = new Set()
     if (new RegExp(w.endsWith("!") ? w : `\\b${w}\\b`).test(s)) out.add(`w:${w.replace("!", "")}`);
   }
   s = s.replace(MONEY_SYMBOL, (_m, sym: string, n: string) => {
-    out.add(moneyToken(CURRENCY_SYMBOL[sym], n));
+    out.add(moneyToken(currencyOfSign(sym), n));
     return " ";
   });
   s = s.replace(MONEY_SYMBOL_AFTER, (_m, n: string, sym: string) => {
-    out.add(moneyToken(CURRENCY_SYMBOL[sym], n));
+    out.add(moneyToken(currencyOfSign(sym), n));
     return " ";
   });
-  s = s.replace(MONEY_WORD, (_m, n: string, word: string) => {
-    out.add(moneyToken(CURRENCY_WORD[word], n));
+  s = s.replace(moneyWord(), (_m, n: string, word: string) => {
+    out.add(moneyToken(currencyOfWord(word), n));
     return " ";
   });
   s = s.replace(TIME_12H, (_m, h: string, mm: string | undefined, ap: string) => {
@@ -362,8 +400,10 @@ export function numberTokens(input: NumericText, ignore: Set<string> = new Set()
     out.add(`t:${h.padStart(2, "0")}:${mm}`);
     return " ";
   });
-  // A numeric character the front door could not turn into a digit must appear, as itself, in the source.
-  for (const m of s.matchAll(/[^\d]/gu)) if (/\p{N}/u.test(m[0]) || CJK_NUMERAL.test(m[0])) out.add(`n:${m[0]}`);
+  // A character with a numeric value (Unicode Numeric_Type) that the numeric view could not turn into a digit must appear,
+  // as itself, in the source.
+  // Read from `plain`, BEFORE lower-casing: lower-casing turns U+2183 (a numeral) into U+2184 (a letter) and would hide it.
+  for (const m of plain.matchAll(/[^\x00-\x7f]/gu)) if (hasNumericValue(m[0])) out.add(`n:${m[0]}`);
   for (const m of s.match(NUMBER) ?? []) {
     const ordinal = /^(\d+)(?:st|nd|rd|th)$/.exec(m);
     if (ordinal) out.add(canonNumber(ordinal[1]));

@@ -1,4 +1,6 @@
+import { domainToASCII } from "node:url";
 import { describe, expect, it } from "vitest";
+import { NUMERIC_TYPE_RANGES } from "./unicode-numeric.generated";
 import { type SourceMap, checkFaqAnswer } from "./faq-checks";
 
 /**
@@ -41,8 +43,16 @@ for (const nu of Intl.supportedValuesOf("numberingSystem")) {
   const g = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => f.format(n));
   if (g.every((x) => /^\p{Nd}$/u.test(x))) g.forEach((x, n) => DIGIT_OF.set(x, String(n))); // decimal-digit systems only
 }
-// The URL parser (WHATWG "remove all ASCII tab or newline") also deletes TAB, LF and CR anywhere in a host.
-const isIgnorable = (cp: number) => cp === 0x09 || cp === 0x0a || cp === 0x0d || (cp >= 0x200b && cp <= 0x200f && cp !== 0x200c && cp !== 0x200d) || cp === 0xad || cp === 0xfeff || cp === 0x2060 || (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069);
+// Characters a host drops: ASK the platform's own IDNA implementation (`domainToASCII`, not the WHATWG `URL` class production
+// asks) about every code point, instead of listing them. Planes 4-13 (U+40000..U+DFFFF) hold no assigned character.
+const IGNORABLE = new Set<number>();
+for (const [lo, hi] of [[0, 0x40000], [0xe0000, 0x110000]]) {
+  for (let cp = lo; cp < hi; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    if (domainToASCII(`a${String.fromCodePoint(cp)}b.test`) === "ab.test") IGNORABLE.add(cp);
+  }
+}
+const isIgnorable = (cp: number) => IGNORABLE.has(cp);
 
 function hostView(s: string): string {
   let out = "";
@@ -58,16 +68,51 @@ function numView(s: string): string {
   for (const ch of s) {
     const cp = ch.codePointAt(0) as number;
     if (DIGIT_OF.has(ch)) out += DIGIT_OF.get(ch);
-    else if ((!isIgnorable(cp) || cp === 0x09 || cp === 0x0a || cp === 0x0d) && cp !== 0x200c && cp !== 0x200d) out += ch;
+    else if (/\p{Cf}/u.test(ch) || (isIgnorable(cp) && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d)) continue; // invisible: nothing (TAB/LF/CR are word breaks)
+    else out += ch;
   }
   return out.normalize("NFKC"); // case kept: Roman numerals are capitals
 }
 
-const CJK_NUMERALS = "〇零一二三四五六七八九十百千万萬億亿兆壹貳贰參叁肆伍陸陆柒捌玖拾佰仟廿卅";
+// Numerals, straight from the Unicode Character Database's Numeric_Type (the generated table's raw ranges, not production's
+// lookup around it): any character with a numeric value that is not an ASCII digit.
+const isUcdNumeric = (cp: number) => {
+  for (let i = 0; i < NUMERIC_TYPE_RANGES.length; i += 2) if (cp >= NUMERIC_TYPE_RANGES[i] && cp <= NUMERIC_TYPE_RANGES[i + 1]) return true;
+  return false;
+};
+const UCD_NUMERIC_NON_ND = (() => {
+  const out: string[] = [];
+  for (let i = 0; i < NUMERIC_TYPE_RANGES.length; i += 2) {
+    for (let cp = NUMERIC_TYPE_RANGES[i]; cp <= NUMERIC_TYPE_RANGES[i + 1]; cp++) {
+      const ch = String.fromCodePoint(cp);
+      if (!/\p{Nd}/u.test(ch)) out.push(ch);
+    }
+  }
+  return out;
+})();
+// Currency signs are \p{Sc}; currency words are the ISO codes and the last word of each currency's English name (ICU's
+// DisplayNames, a different API from the formatter production reads), singular or plural. Metals and test codes (X..) are no amounts.
+const CURRENCY_WORDS = new Set<string>();
+{
+  const names = new Intl.DisplayNames(["en"], { type: "currency" });
+  for (const code of Intl.supportedValuesOf("currency")) {
+    CURRENCY_WORDS.add(code.toLowerCase());
+    if (code.startsWith("X")) continue;
+    const last = (names.of(code) ?? "").toLowerCase().replace(/\s*\(.*\)\s*$/, "").split(/\s+/).pop() ?? "";
+    if (/^\p{L}+$/u.test(last)) for (const w of [last, `${last}s`, `${last}es`, last.replace(/y$/, "ies")]) CURRENCY_WORDS.add(w);
+  }
+  for (const w of ["buck", "bucks", "rmb"]) CURRENCY_WORDS.add(w);
+}
+const SIGNS = (() => {
+  const out: string[] = [];
+  for (let cp = 0; cp < 0x30000; cp++) if (cp < 0xd800 || cp > 0xdfff) if (/\p{Sc}/u.test(String.fromCodePoint(cp))) out.push(String.fromCodePoint(cp));
+  return out;
+})();
+
 /**
  * Every Roman numeral a text uses, as uppercase letters, read from the RAW text (NFKC would turn the numeral characters into
  * ordinary letters, lowercase for the small forms, before anyone could see them):
- *  - each numeral CHARACTER (U+2160..U+2188), any case, glued to anything;
+ *  - each numeral CHARACTER (a character with a numeric value that NFKC turns into roman letters), any case, glued to anything;
  *  - a standalone ASCII capital numeral ("X dollars"); a lone "I" is the pronoun;
  *  - a lowercase ASCII word only where it is used as a number: right after a currency sign, or right before a currency word
  *    or am/pm ("iv dollars"). Elsewhere it is a word ("mix", "cm").
@@ -76,13 +121,25 @@ function romans(raw: string): string[] {
   const out: string[] = [];
   for (const ch of raw) {
     const cp = ch.codePointAt(0) as number;
-    if (cp >= 0x2160 && cp <= 0x2188) out.push(ch.normalize("NFKC").toUpperCase());
+    // a numeral character: has a numeric value in the UCD and is, to NFKC, nothing but roman letters
+    if (cp > 0x7f && isUcdNumeric(cp) && /^[ivxlcdm]+$/i.test(ch.normalize("NFKC"))) out.push(ch.normalize("NFKC").toUpperCase());
   }
   for (const m of raw.matchAll(/(?<![\p{L}\p{N}])[IVXLCDM]+(?![\p{L}\p{N}])/gu)) if (isRoman(m[0])) out.push(m[0]);
-  const unitWords = "dollars?|usd|euros?|eur|pounds?|gbp|yen|bucks?|francs|pesos|yuan|rupees?|rmb";
-  for (const m of raw.matchAll(new RegExp(`(?<=[$\u20ac\u00a3\u00a5\u20b9]\\s?)([ivxlcdm]+)(?![\\p{L}\\p{N}])|(?<![\\p{L}\\p{N}])([ivxlcdm]+)(?=\\s?(?:${unitWords}|[ap]\\.?m)(?![\\p{L}\\p{N}]))`, "gu"))) {
-    const t = (m[1] ?? m[2]).toUpperCase();
-    if (isRoman(t)) out.push(t);
+  // lowercase, read after lower-casing the WHOLE text: every case of "iv" is the same word. A run of roman letters that is a whole
+  // word, right after a currency sign, or right before a currency word (whole word) or am/pm.
+  const low = raw.toLowerCase();
+  const letter = (c: string | undefined) => c !== undefined && /[\p{L}\p{N}]/u.test(c);
+  for (const m of low.matchAll(/[ivxlcdm]+/g)) {
+    const i = m.index as number;
+    const j = i + m[0].length;
+    if (letter(low[i - 1] ?? undefined) && !/\p{Sc}/u.test(low[i - 1] ?? "")) continue; // inside a longer word
+    const before = low.slice(0, i).replace(/\s$/, "");
+    const afterSign = /\p{Sc}$/u.test(before) && !letter(low[j]);
+    const rest = low.slice(j).replace(/^\s/, "");
+    const word = /^\p{L}+/u.exec(rest)?.[0] ?? "";
+    const beforeWord = !letter(low[j]) && CURRENCY_WORDS.has(word);
+    const beforeAmPm = /^[ap]\.?m(?![\p{L}\p{N}])/u.test(rest);
+    if ((afterSign || beforeWord || beforeAmPm) && isRoman(m[0].toUpperCase())) out.push(m[0].toUpperCase());
   }
   return out;
 }
@@ -157,12 +214,15 @@ function ungrounded(answer: string, source: string): string[] {
   // numbers, in the number view
   const na = numView(answer);
   const ns = numView(source);
-  const sourceRuns = new Set(ns.match(/[0-9]+/g) ?? []);
-  for (const run of na.match(/[0-9]+/g) ?? []) if (!sourceRuns.has(run)) found.push(`#${run}`);
+  // a number is digits, with a thousands comma only between groups of three and an optional decimal part ("1,0" is two numbers)
+  const NUMBER_VALUE = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g;
+  const value = (run: string) => String(Number(run.replace(/,/g, "")));
+  const sourceRuns = new Set((ns.match(NUMBER_VALUE) ?? []).map(value));
+  for (const run of na.match(NUMBER_VALUE) ?? []) if (!sourceRuns.has(value(run))) found.push(`#${value(run)}`);
   // numerals that are not digits: a Roman or CJK numeral the source does not itself contain
   const sourceRomans = new Set(romans(source));
   for (const r of romans(answer)) if (!sourceRomans.has(r)) found.push(`R${r}`);
-  for (const ch of na) if (CJK_NUMERALS.includes(ch) && !ns.includes(ch)) found.push(`N${ch}`);
+  for (const ch of na) if ((ch.codePointAt(0) as number) > 0x7f && isUcdNumeric(ch.codePointAt(0) as number) && !DIGIT_OF.has(ch) && !ns.includes(ch)) found.push(`N${ch}`);
   return found;
 }
 
@@ -217,8 +277,22 @@ function inScript(text: string, r: () => number): string {
   return text.replace(/[0-9]/g, (d) => (r() < 0.85 ? glyph[Number(d)] : d)); // mostly one script, an occasional ASCII digit mixed in
 }
 
+const ROMAN_WORDS = ["iv", "IV", "Iv", "iV", "ix", "IX", "xi", "Xi", "mix", "Mix"];
+const CURRENCY_PICK = ["dollars", "Dollars", "DOLLARS", "usd", "USD", "Usd", "eur", "EUR", "euros", "yen", "baht", "sek", "SEK", "jpy", "krw", "KRW", "inr", "pounds", "rupees"];
+function dynamicAtom(r: () => number): string {
+  const pick = <T,>(xs: T[]) => xs[Math.floor(r() * xs.length)];
+  switch (Math.floor(r() * 5)) {
+    case 0: return `Parking is ${pick(SIGNS)}${pick(ROMAN_WORDS)}.`; // any currency sign, any case
+    case 1: return `Parking is ${pick(ROMAN_WORDS)} ${pick(CURRENCY_PICK)}.`;
+    case 2: return `Doors open at ${pick(ROMAN_WORDS)} ${pick(["PM", "pm", "Pm", "p.m.", "AM"])}.`;
+    case 3: return `Refunds up to ${pick(UCD_NUMERIC_NON_ND)} hours.`; // any character with a numeric value
+    default: return `Parking is $${pick(UCD_NUMERIC_NON_ND)}${pick(["", "0"])}.`;
+  }
+}
+
 function answerFrom(r: () => number): string {
   const pick = <T,>(xs: T[]) => xs[Math.floor(r() * xs.length)];
+  if (r() < 0.12) return dynamicAtom(r);
   if (r() < 0.3) {
     // trailing slashes: only the path's may differ, never one inside a query or fragment
     const link = pick(["https://tickets.example.com", "tickets.example.com", "https://tickets.example.com/", "https://tickets.example.com/EventPass"]) + pick(["", "/", "?return=/VIP", "?return=/VIP/", "/?return=/VIP", "/?return=/VIP/", "#/VIP", "#/VIP/", "/#/VIP/"]);
@@ -236,13 +310,23 @@ function answerFrom(r: () => number): string {
   return out;
 }
 
-describe("grounding property: an ungrounded domain, email or host never passes as the model's answer", () => {
-  it("holds for 6000 seeded hostile answers against seven sources", () => {
-    // FAQ_PROPERTY_SEED / FAQ_PROPERTY_RUNS widen the hunt locally; CI uses the fixed defaults.
-    const r = rng(Number(process.env.FAQ_PROPERTY_SEED ?? 20261115));
+// The seeds CI runs on every PR: the one that found the last bypass (2024), the default, and a spread. A seed is a
+// reproducible run; FAQ_PROPERTY_SEEDS ("1-200" or "7,9,11") widens the hunt locally (`pnpm test:fuzz`).
+function seedList(): number[] {
+  const spec = process.env.FAQ_PROPERTY_SEEDS ?? process.env.FAQ_PROPERTY_SEED;
+  if (!spec) return [2024, 20261115, 1, 7, 42, 99, 314, 777, 1337, 4242, 65536, 123456789];
+  return spec.split(",").flatMap((part) => {
+    const range = /^(\d+)-(\d+)$/.exec(part.trim());
+    return range ? Array.from({ length: Number(range[2]) - Number(range[1]) + 1 }, (_, i) => Number(range[1]) + i) : [Number(part)];
+  });
+}
+
+describe("grounding property: an ungrounded domain, email, host, number or numeral never passes as the model's answer", () => {
+  const runs = Number(process.env.FAQ_PROPERTY_RUNS ?? 2500);
+  it.each(seedList())("holds for seeded hostile answers against seven sources (seed %i)", (seed) => {
+    const r = rng(seed);
     const failures: string[] = [];
     let hostile = 0;
-    const runs = Number(process.env.FAQ_PROPERTY_RUNS ?? 6000);
     for (let i = 0; i < runs; i++) {
       const answer = answerFrom(r);
       const source = SOURCES[i % SOURCES.length];
@@ -251,9 +335,9 @@ describe("grounding property: an ungrounded domain, email or host never passes a
       const out = checkFaqAnswer({ status: "answered", answer, citations: ["F1"] }, mapFor(source));
       if (out.mode === "model" && out.answer !== null && ungrounded(out.answer, source).length > 0) failures.push(`${JSON.stringify(answer)} -> ${JSON.stringify(out.answer)} against source #${i % SOURCES.length}`);
     }
-    expect(failures.slice(0, 15), `${failures.length} bypasses`).toEqual([]);
+    expect(failures.slice(0, 15), `seed ${seed}: ${failures.length} bypasses`).toEqual([]);
     expect(hostile).toBeGreaterThan(runs / 2); // the generator really is producing hostile answers
-  }, 30_000 + Number(process.env.FAQ_PROPERTY_RUNS ?? 6000) * 5);
+  }, 30_000 + runs * 5);
 
   it("the crude scan itself sees what it must (so the property is not vacuous)", () => {
     expect(ungrounded("Buy at тест.рф/pay", SOURCES[0])).toContain("тест.рф");

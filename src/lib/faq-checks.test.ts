@@ -1,6 +1,9 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { type SourceMap, asWritten, checkFaqAnswer, findLinksAndEmails as findLinksAndEmailsView, findPhones as findPhonesView, numberTokens as numberTokensView, numericView, quotedText } from "./faq-checks";
+import { currencyOfSign, currencyOfWord } from "./currency";
+import { NUMERIC_TYPE_RANGES } from "./unicode-numeric.generated";
+import { deletedCodePoints, hasNumericValue } from "./unicode-derived";
 
 // Each scanner takes its own branded view of the text (a type error otherwise); these helpers send raw test strings through it.
 const numberTokens = (s: string, ignore?: Set<string>) => numberTokensView(numericView(s), ignore);
@@ -532,12 +535,154 @@ describe("one view per purpose", () => {
     // every normalisation call lives inside the numeric view, and nowhere else
     const view = code.slice(code.indexOf("export function numericView"), code.indexOf("export function asWritten"));
     expect(code.match(/\.normalize\(/g)?.length).toBe(view.match(/\.normalize\(/g)?.length);
-    expect(code.match(/\\p\{Cf\}\/gu/g)).toHaveLength(1);
     expect(view).toContain("as NumericText");
-    // and no other file can mint a view: a cast into either type anywhere else in src/ is a failure
+    // Nothing else can mint a view: that is the lint rule `brand/no-brand-cast` (every file, tests and scripts included,
+    // `as never` and `<NumericText>x` too), proved by test/eslint-brand-rule.test.ts. No file may switch it off:
     const walk = (dir: URL): string[] =>
-      readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(new URL(`${e.name}/`, dir)) : /\.tsx?$/.test(e.name) ? [new URL(e.name, dir).pathname] : []));
-    const offenders = walk(new URL("../", import.meta.url)).filter((f) => !f.endsWith("/lib/faq-checks.ts") && !f.endsWith("/lib/faq-checks.test.ts") && /\bas (unknown as )?(NumericText|WrittenText)\b/.test(readFileSync(f, "utf8")));
-    expect(offenders).toEqual([]);
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() && e.name !== "node_modules" && e.name !== ".next" ? walk(new URL(`${e.name}/`, dir)) : /\.(tsx?|mjs)$/.test(e.name) ? [new URL(e.name, dir).pathname] : []));
+    const root = new URL("../../", import.meta.url);
+    const disabled = [...walk(new URL("src/", root)), ...walk(new URL("test/", root)), ...walk(new URL("scripts/", root))].filter((f) => !f.endsWith("/faq-checks.test.ts") && !f.endsWith("/eslint-brand-rule.test.ts") && /no-brand-cast/.test(readFileSync(f, "utf8")));
+    expect(disabled).toEqual([]);
+  });
+});
+
+// Review 5923899510: every remaining finding had one cause, a hand-written list of "the numerals / invisible characters /
+// currencies somebody thought of". These tests walk the CLASS (every Unicode currency sign, every ISO code, every code
+// point with a numeric value, every character the URL parser deletes), not instances.
+describe("derived lists: the class, not the instances", () => {
+  const PRICE = "Parking is $10. Doors open at 9:30 PM CST. Call 512-555-9999.";
+  const map: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: `Q\n${PRICE}` }]]);
+  const run = (answer: string) => checkFaqAnswer({ status: "answered", answer, citations: ["F1"] }, map);
+  const refused = (answer: string) => expect(run(answer), answer).toMatchObject({ mode: "quoted", answer: null, flags: expect.arrayContaining(["unsupported_number"]) });
+  const cases = (w: string) => [w, w.toUpperCase(), w[0].toUpperCase() + w.slice(1), w.replace(/./g, (c, i) => (i % 2 ? c.toUpperCase() : c))];
+
+  const allCodePoints = (test: (ch: string) => boolean) => {
+    const out: string[] = [];
+    for (let cp = 0; cp < 0x110000; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const ch = String.fromCodePoint(cp);
+      if (test(ch)) out.push(ch);
+    }
+    return out;
+  };
+
+  describe("one currency table, lower-cased first", () => {
+    const SIGNS = allCodePoints((c) => /\p{Sc}/u.test(c));
+    it("a lowercase Roman numeral next to ANY Unicode currency sign is refused, in every case", () => {
+      expect(SIGNS.length).toBeGreaterThan(50);
+      for (const sign of SIGNS) for (const n of cases("iv")) refused(`Parking is ${sign}${n}.`);
+      for (const sign of ["₩", "₽", "₺", "₪", "₫", "₱", "₦", "฿"]) for (const n of ["iv", "IV", "Iv", "iV"]) refused(`Parking is ${sign}${n}.`);
+    });
+    it("a Roman numeral before ANY ISO currency code or currency name is refused, in every case (and before am/pm)", () => {
+      const codes = Intl.supportedValuesOf("currency");
+      expect(codes.length).toBeGreaterThan(100);
+      for (const code of codes) for (const w of [code, code.toLowerCase()]) for (const n of ["iv", "Iv", "iV"]) refused(`Parking is ${n} ${w}.`);
+      for (const w of ["dollars", "Dollars", "DOLLARS", "euros", "yen", "baht", "pounds", "USD", "EUR"]) for (const n of ["iv", "Iv", "iV", "IV"]) refused(`Parking is ${n} ${w}.`);
+      for (const n of ["ix", "Ix", "iX", "IX"]) for (const pm of ["PM", "pm", "Pm", "p.m."]) refused(`Doors open at ${n} ${pm}.`);
+    });
+    it("words that merely contain Roman letters are still words", () => {
+      for (const ok of ["We have a mix of demos.", "Parking is civil, mild and live.", "There is 30 cm of room.", "Call 512-555-9999 all day."]) {
+        expect([...numberTokens(ok)].filter((t) => t.startsWith("r:")), ok).toEqual([]);
+      }
+    });
+    it("every price form of one currency is the same price, and two currencies never are", () => {
+      expect(numberTokens("₹10")).toEqual(numberTokens("10 INR"));
+      expect(numberTokens("$10")).toEqual(numberTokens("10 dollars"));
+      expect(numberTokens("£10")).toEqual(numberTokens("10 pounds"));
+      expect(numberTokens("€10")).toEqual(numberTokens("10 EUR"));
+      expect(numberTokens("10 SEK")).not.toEqual(numberTokens("10 NOK"));
+      expect(numberTokens("¢10")).not.toEqual(numberTokens("€10"));
+      expect(numberTokens("10 pesos")).not.toEqual(numberTokens("₱10"));
+      // a sign no ISO code owns is its own currency, equal only to itself
+      expect(numberTokens("¢10")).toEqual(numberTokens("10¢".replace("10¢", "¢10")));
+      expect(numberTokens("¢10")).not.toEqual(numberTokens("£10"));
+    });
+    it("the table reads signs and words from ICU", () => {
+      expect(currencyOfSign("$")).toBe("usd");
+      expect(currencyOfSign("₹")).toBe("inr");
+      expect(currencyOfSign("¢")).toBe("sc:¢");
+      expect(currencyOfWord("dollars")).toBe("usd");
+      expect(currencyOfWord("baht")).toBe("thb");
+      expect(currencyOfWord("sek")).toBe("sek");
+    });
+  });
+
+  describe("numerals from Unicode Numeric_Type", () => {
+    const NUMERIC = allCodePoints(hasNumericValue);
+    it("the generated table covers what \\p{N} does not, and \\p{N} covers every character the table lists", () => {
+      const table = allCodePoints((c) => NUMERIC_TYPE_RANGES.some((v, i) => i % 2 === 0 && (c.codePointAt(0) as number) >= v && (c.codePointAt(0) as number) <= NUMERIC_TYPE_RANGES[i + 1]));
+      expect(table.length).toBeGreaterThan(1900);
+      expect(table).toContain("十");
+      expect(table).toContain("卄");
+      expect(table).toContain("〹");
+      // letters with numeric values are the reason \p{N} alone is not enough
+      expect(table.filter((c) => !/\p{N}/u.test(c)).length).toBeGreaterThan(50);
+    });
+    it("every character with a numeric value either folds to ASCII digits or is refused unless the source has it", () => {
+      expect(NUMERIC.length).toBeGreaterThan(1900);
+      for (const c of NUMERIC) {
+        const view = numericView(c);
+        const tokens = numberTokensView(view);
+        if (/^[0-9]+$/.test(view.normalize("NFKC").replace(/\s/g, ""))) continue; // folded to digits: compared as the number it is
+        // anything else MUST leave a token (n:, r:, or digits mixed with a token) that a source lacking it cannot have
+        expect(tokens.size, `U+${(c.codePointAt(0) as number).toString(16)}`).toBeGreaterThan(0);
+      }
+    });
+    it("the named leaks are closed: U+5344, U+3039 and the rest of the class", () => {
+      for (const c of ["卄", "〹", "〸", "〺", "十", "廿", "卅", "万", "萬"]) refused(`Parking is $${c}.`);
+      // U+2183 and U+2184 sit among the Roman numerals but are LETTERS in the UCD (Lu, Ll; no numeric value): in neither list
+      expect(NUMERIC).not.toContain("Ↄ");
+      expect(NUMERIC).not.toContain("ↄ");
+      // and in the source, verbatim, they pass
+      const m2: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nParking is $卄 today." }]]);
+      expect(checkFaqAnswer({ status: "answered", answer: "Parking is $卄 today.", citations: ["F1"] }, m2).mode).toBe("model");
+    });
+  });
+
+  describe("a comma is a thousands separator only between groups of three", () => {
+    it('"$1,0" and "$1,5" are not "$10" and "$15"; "$1,000" is still "$1000"', () => {
+      expect(numberTokens("$1,000")).toEqual(numberTokens("$1000"));
+      expect(numberTokens("$1,000,000.50")).toEqual(numberTokens("$1000000.5"));
+      expect(numberTokens("$1,0")).not.toEqual(numberTokens("$10"));
+      expect(numberTokens("$1,5")).not.toEqual(numberTokens("$15"));
+      expect(numberTokens("1,50")).not.toEqual(numberTokens("150"));
+      refused("Parking is $1,0.");
+      // found by the property test (seed 6): U+1F102 "DIGIT ONE COMMA" is "1," to NFKC
+      refused("Parking is $\u{1F102}0.");
+    });
+  });
+
+  describe("characters the URL parser deletes, found by asking the URL parser", () => {
+    it("the fast derivation equals probing every code point (the categories scanned are enough)", () => {
+      const fast = deletedCodePoints();
+      const all = deletedCodePoints(true);
+      expect(fast).toEqual(all);
+      expect(all.ignorable.length).toBeGreaterThan(200);
+      expect(all.stripped).toEqual([0x09, 0x0a, 0x0d]);
+      for (const cp of [0x200b, 0xad, 0x2060, 0xfeff, 0x34f, 0xfe0f, 0x180b, 0xe0100]) expect(all.ignorable, cp.toString(16)).toContain(cp);
+    }, 60_000);
+
+    const IGN = deletedCodePoints().ignorable.filter((cp) => ![0x09, 0x0a, 0x0d].includes(cp)).map((cp) => String.fromCodePoint(cp));
+    const SRC = "Buy at https://tickets.example.com/EventPass today.";
+    const m: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: `Q\n${SRC}` }]]);
+    const link = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, m);
+
+    it("a deleted character anywhere in a link's scheme and slashes does not hide it (dotless hosts included)", () => {
+      for (const ch of IGN) {
+        for (const a of [`See https:${ch}//localhost/admin now.`, `See https:/${ch}/localhost/admin now.`, `See https${ch}://localhost/admin now.`, `See ${ch}https://localhost/admin now.`, `Refunds:${ch}//evil\n.test/x].`, `See http:${ch}//evil/x now.`]) {
+          expect(link(a), `U+${(ch.codePointAt(0) as number).toString(16)} ${JSON.stringify(a)}`).toMatchObject({ mode: "quoted", flags: expect.arrayContaining(["unsupported_link"]) });
+        }
+      }
+    });
+    it("seed 2024's bypass stays closed", () => {
+      expect(link("Refunds:​//evil\n.test/x].").mode).toBe("quoted");
+    });
+    it("a deleted character is nothing inside a number, and a TAB/LF/CR is a break", () => {
+      for (const ch of IGN) expect(numericView(`1${ch}0`), `U+${(ch.codePointAt(0) as number).toString(16)}`).toBe(numericView("10"));
+      for (const ch of ["\t", "\n", "\r"]) expect(numericView(`1${ch}0`)).toBe(`1${ch}0`);
+    });
+    it("every character the URL parser strips is collapsed before anything is checked", () => {
+      for (const ch of ["\t", "\n", "\r"]) expect(link(`Buy at https://tickets.example.com/EventPass${ch}today.`).answer).toBe("Buy at https://tickets.example.com/EventPass today.");
+    });
   });
 });
