@@ -130,3 +130,39 @@ describe("calendar words and number words are facts too", () => {
     expect(chk("One of the rooms is free.", ["F2"]).mode).toBe("model");
   });
 });
+
+describe("time zones, ambiguous words and number words", () => {
+  const src: SourceMap = new Map([
+    ["E1", { id: "E1", kind: "event", label: "when", text: "When: starts Thursday, December 3, 2026 at 7:00 PM CST; ends at 9:00 PM CST. Doors open at 6:30 PM CST." }],
+    ["E2", { id: "E2", kind: "event", label: "where", text: "Where: Hall. Starts 7:00 PM GMT+5:30." }],
+  ]);
+  const chk = (answer: string, ids: string[]) => checkFaqAnswer({ status: "answered", answer, citations: ids }, src);
+
+  it("an answer that names a zone must name the source's zone", () => {
+    expect(chk("It starts at 7:00 PM CST.", ["E1"]).mode).toBe("model");
+    expect(chk("It starts at 7:00 PM Central Time.", ["E1"]).mode).toBe("model");
+    expect(chk("It starts at 7:00 PM EST.", ["E1"])).toMatchObject({ mode: "quoted", flags: ["unsupported_number"] });
+    expect(chk("It starts at 7:00 PM CDT.", ["E1"]).mode).toBe("quoted");
+    expect(chk("It starts at 7:00 PM Eastern Time.", ["E1"]).mode).toBe("quoted");
+    expect(chk("It starts at 7:00 PM.", ["E1"]).mode).toBe("model");
+  });
+  it("offsets are compared too", () => {
+    expect(chk("Starts 7:00 PM GMT+5:30.", ["E2"]).mode).toBe("model");
+    expect(chk("Starts 7:00 PM UTC +05:30.", ["E2"]).mode).toBe("model");
+    expect(chk("Starts 7:00 PM GMT+5.", ["E2"]).mode).toBe("quoted");
+    expect(chk("Starts 7:00 PM IST.", ["E2"]).mode).toBe("quoted");
+  });
+  it("sun, sat, wed and march are words unless they sit next to a date", () => {
+    expect(chk("We march in at 6:30 PM and sat down; the sun was out, wed love to see you.", ["E1"]).mode).toBe("model");
+    expect(chk("See you Sun 3.", ["E1"]).mode).toBe("quoted");
+    expect(chk("See you Wed, December 3.", ["E1"]).mode).toBe("quoted");
+    expect(chk("See you Thu, Dec 3.", ["E1"]).mode).toBe("model");
+    expect(chk("It is on March 3.", ["E1"]).mode).toBe("quoted");
+    expect(chk("It is on 3 March.", ["E1"]).mode).toBe("quoted");
+  });
+  it("'one hundred and twenty' is 120; 'five and ten' stays two numbers", () => {
+    expect([...numberTokens("one hundred and twenty")]).toEqual(["120"]);
+    expect([...numberTokens("two thousand and five")]).toEqual(["2005"]);
+    expect([...numberTokens("five and ten")].sort()).toEqual(["10", "5"]);
+  });
+});

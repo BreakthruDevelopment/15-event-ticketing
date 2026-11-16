@@ -97,7 +97,9 @@ const NUMBER = /[a-z]*\d+(?:[.,]\d+)*[a-z]*/g;
 
 const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 const WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
-const MONTH_RE = "(?:january|february|march|april|june|july|august|september|october|november|december)";
+// "march" and "may" are ordinary words too, so they count as months only next to a day number ("March 3", "3 May").
+const MONTH_RE = "(?:january|february|april|june|july|august|september|october|november|december)";
+const MONTH_ANY = `(?:${MONTH_RE.slice(3, -1)}|may!?|march!?)`;
 // Abbreviations only where they can't be an ordinary word: a month before a day number ("Dec 3"), "May" only before a day number.
 const MONTH_ABBR: Record<string, string> = { jan: "january", feb: "february", mar: "march", apr: "april", jun: "june", jul: "july", aug: "august", sep: "september", sept: "september", oct: "october", nov: "november", dec: "december" };
 const WEEKDAY_ABBR: Record<string, string> = { mon: "monday", tue: "tuesday", tues: "tuesday", wed: "wednesday", thu: "thursday", thur: "thursday", thurs: "thursday", fri: "friday", sat: "saturday", sun: "sunday" };
@@ -108,7 +110,29 @@ const SMALL: Record<string, number> = {
   forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
 };
 const NUM_WORD = `(?:${[...Object.keys(SMALL), "hundred", "thousand"].join("|")})`;
-const NUM_WORDS_RE = new RegExp(`\\b${NUM_WORD}(?:(?:[\\s-]+)${NUM_WORD})*\\b`, "g");
+// "one hundred and twenty": "and" joins only after hundred or thousand ("five and ten" stays two numbers).
+const NUM_WORDS_RE = new RegExp(`\\b${NUM_WORD}(?:[\\s-]+${NUM_WORD}|(?<=hundred|thousand)\\s+and\\s+${NUM_WORD})*\\b`, "g");
+
+const ZONE_FAMILY: Record<string, string> = { est: "eastern", edt: "eastern", cst: "central", cdt: "central", mst: "mountain", mdt: "mountain", pst: "pacific", pdt: "pacific", akst: "alaska", akdt: "alaska", hst: "hawaii" };
+const ZONE_ABBR = /\b(EST|EDT|CST|CDT|MST|MDT|PST|PDT|AKST|AKDT|HST|UTC|GMT|BST|CET|CEST|EET|EEST|IST|JST|KST|AEST|AEDT|NZST|NZDT|WET|WEST)\b(?!\s?[+-]\d)/g;
+const ZONE_OFFSET = /\b(?:GMT|UTC)\s?([+-])(\d{1,2})(?::?(\d{2}))?/gi;
+const ZONE_NAMED = /\b(eastern|central|mountain|pacific|alaska|hawaii)(?:[- ]aleutian)?\s+(?:standard\s+|daylight\s+)?time\b/gi;
+
+/**
+ * Time zones the text states: an abbreviation ("CST", also as its family "central"), a GMT or UTC offset, or a named
+ * zone ("Central Time"). A time is only the same time in the same zone, so an answer that names a zone must name one the
+ * cited source names ("7:00 PM EST" against "7:00 PM CST" is a different time).
+ */
+function zoneTokens(input: string, out: Set<string>) {
+  for (const m of input.matchAll(ZONE_ABBR)) {
+    const z = m[1].toLowerCase();
+    if (z === "utc" || z === "gmt") out.add("z:gmt");
+    else out.add(`z:${z}`);
+    if (ZONE_FAMILY[z]) out.add(`z:${ZONE_FAMILY[z]}`);
+  }
+  for (const m of input.matchAll(ZONE_OFFSET)) out.add(`z:gmt${m[1]}${Number(m[2])}:${m[3] ?? "00"}`);
+  for (const m of input.matchAll(ZONE_NAMED)) out.add(`z:${m[1].toLowerCase()}`);
+}
 
 /** "ten" -> "10", "twenty-five" -> "25", "one hundred" -> "100". A lone "one" stays a word ("one of the rooms"). */
 function numberWordsToDigits(s: string): string {
@@ -144,15 +168,18 @@ export function numberTokens(input: string, ignore: Set<string> = new Set()): Se
   const out = new Set<string>();
   // Calendar words are facts too: a month, a weekday and a month-and-day pair must each appear in a cited source
   // ("January 3" against a source that says "December 3" is a different date; so is "Friday" for "Thursday").
+  zoneTokens(input, out);
   s = numberWordsToDigits(s);
   s = s.replace(new RegExp(`\\b(${Object.keys(MONTH_ABBR).join("|")})\\.?(?=\\s*\\d)`, "g"), (_m, a: string) => MONTH_ABBR[a]);
-  s = s.replace(/\bmay(?=\s+\d)/g, "may!");
-  s = s.replace(new RegExp(`\\b(${Object.keys(WEEKDAY_ABBR).join("|")})(?=[.,])`, "g"), (_m, a: string) => WEEKDAY_ABBR[a]);
-  const monthDay = (month: string, day: string) => out.add(`d:${month}-${Number(day)}`);
-  for (const m of s.matchAll(new RegExp(`\\b(${MONTH_RE}|may!)\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, "g"))) monthDay(m[1].replace("!", ""), m[2]);
-  for (const m of s.matchAll(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?(${MONTH_RE}|may!)`, "g"))) monthDay(m[2].replace("!", ""), m[1]);
-  for (const w of [...MONTHS.filter((x) => x !== "may"), "may!", ...WEEKDAYS]) {
-    if (new RegExp(w === "may!" ? "may!" : `\\b${w}\\b`).test(s)) out.add(`w:${w.replace("!", "")}`);
+  s = s.replace(/\b(may|march)(?=\s+\d)/g, "$1!");
+  s = s.replace(/(\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?)(may|march)\b/g, "$1$2!");
+  // A weekday abbreviation ("Sat", "Wed", "Sun") counts only next to a date.
+  s = s.replace(new RegExp(`\\b(${Object.keys(WEEKDAY_ABBR).join("|")})(?=[.,]?\\s+(?:\\d|${MONTH_ANY}))`, "g"), (_m, a: string) => WEEKDAY_ABBR[a]);
+  const monthDay = (month: string, day: string) => out.add(`d:${month.replace("!", "")}-${Number(day)}`);
+  for (const m of s.matchAll(new RegExp(`\\b(${MONTH_ANY})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, "g"))) monthDay(m[1], m[2]);
+  for (const m of s.matchAll(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?(${MONTH_ANY})`, "g"))) monthDay(m[2], m[1]);
+  for (const w of [...MONTHS.filter((x) => x !== "may" && x !== "march"), "may!", "march!", ...WEEKDAYS]) {
+    if (new RegExp(w.endsWith("!") ? w : `\\b${w}\\b`).test(s)) out.add(`w:${w.replace("!", "")}`);
   }
   s = s.replace(MONEY_SYMBOL, (_m, n: string) => {
     out.add(`$${canonNumber(n)}`);

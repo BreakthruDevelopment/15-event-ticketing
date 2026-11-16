@@ -31,6 +31,10 @@ export const FAQ_LIMITS = {
   asksPerHour: 10,
   asksPerEventPerDay: 300,
   cacheHours: 24,
+  /** Cache-hit asks per user per hour (they cost no model call, but each leaves a small ledger row). */
+  cachedPerHour: 60,
+  /** Ask ledger rows are pruned after this long. */
+  ledgerHours: 48,
   retentionDays: 30,
   /** Rows the organiser's question list returns (newest first). */
   questionsListMax: 200,
@@ -38,6 +42,7 @@ export const FAQ_LIMITS = {
 
 export const TOO_MANY_ASKS = "You've asked a lot of questions this hour. Try again later.";
 export const EVENT_ASKS_CAPPED = "This event's FAQ bot has answered a lot of questions today. Try again tomorrow, or contact the organiser.";
+export const TOO_MANY_CACHED = "You're asking a lot of questions this hour. Try again later.";
 export const BOT_BUSY = "The FAQ bot is busy right now. Try again later.";
 
 /** How one entry appears in the prompt, and what the budget counts. */

@@ -563,22 +563,92 @@ describe.skipIf(!url)("FAQ entries and the FAQ bot (Postgres)", () => {
       expect(await askRows(ev.id)).toHaveLength(1);
     });
 
-    it("a cache-hit ask is recorded under its op id: after the FAQ changes, a replay returns the same answer with no model call and no charge", async () => {
+    const ledgerCount = async (userId: string) => (await sql`select count(*)::int as n from op_ledger where actor_id = ${userId} and kind = 'faq-ask'`)[0].n as number;
+
+    it("a cache-hit ask is recorded under its op id as a small pointer: after the FAQ changes, a replay returns the same answer, no model call, no charge", async () => {
       const ev = await withParking();
       const run = model(PARK);
       await ASK.askFaq(att, ev.id, q("Where can I leave my car?"), { run });
       const body = q("where can I leave my car");
       const hit = await ASK.askFaq(att2, ev.id, body, { run });
       expect(hit.mode).toBe("cached");
+      const stored = (await sql`select result, pg_column_size(result) as bytes from op_ledger where actor_id = ${att2.id}`)[0];
+      expect(Object.keys(stored.result).sort()).toEqual(["ref", "v"]);
+      expect(stored.bytes).toBeLessThan(200);
       await add(ev, "Is there Wi-Fi?", "Yes.");
       await sql`update faq_ask set created_at = now() - interval '30 hours' where event_id = ${ev.id}`;
       const again = await ASK.askFaq(att2, ev.id, body, { run });
-      expect(again).toEqual({ ...hit, replayed: true });
+      expect(again).toMatchObject({ replayed: true, status: "answered", mode: "cached", answerMode: "model", text: PARK.answer });
       expect(run).toHaveBeenCalledTimes(1);
       expect(await count("", att2.id, "ai")).toBe(0);
       expect(await askRows(ev.id)).toHaveLength(1);
-      // the id can't be reused for another question
       await expect(ASK.askFaq(att2, ev.id, { ...body, question: "Something else?" }, { run })).rejects.toMatchObject({ status: 409, code: "op_id_reused" });
+    });
+
+    it("a replayed cache hit whose row is gone, or a quoted one whose entries changed, is asked normally", async () => {
+      const ev = await withParking();
+      const quoted = model({ status: "answered", answer: "It costs $12.", citations: ["F1"] });
+      await ASK.askFaq(att, ev.id, q("How much is parking?"), { run: quoted });
+      const body = q("how much is parking");
+      expect((await ASK.askFaq(att2, ev.id, body, { run: quoted })).mode).toBe("cached");
+      await add(ev, "Is there Wi-Fi?", "Yes.");
+      const fresh = model(PARK);
+      const r = await ASK.askFaq(att2, ev.id, body, { run: fresh });
+      expect(r).toMatchObject({ mode: "model", replayed: false });
+      expect(fresh).toHaveBeenCalledTimes(1);
+      expect(await count("", att2.id, "ai")).toBe(1);
+      // the row a pointer refers to is gone
+      const body2 = q("where can I leave my car");
+      await ASK.askFaq(att, ev.id, q("Where can I leave my car?"), { run: fresh });
+      expect((await ASK.askFaq(att2, ev.id, body2, { run: fresh })).mode).toBe("cached");
+      await sql`delete from faq_ask where event_id = ${ev.id}`;
+      const r2 = await ASK.askFaq(att2, ev.id, body2, { run: fresh });
+      expect(r2).toMatchObject({ mode: "model", replayed: false });
+    });
+
+    it("parallel duplicates of a cache-hit ask with one op id: both answer, one ledger row", async () => {
+      const ev = await withParking();
+      const run = model(PARK);
+      await ASK.askFaq(att, ev.id, q("Where can I leave my car?"), { run });
+      const body = q("where can I leave my car");
+      const out = await Promise.all([ASK.askFaq(att2, ev.id, body, { run }), ASK.askFaq(att2, ev.id, body, { run }), ASK.askFaq(att2, ev.id, body, { run })]);
+      expect(out.filter((o) => !o.replayed)).toHaveLength(1);
+      for (const o of out) expect(o).toMatchObject({ mode: "cached", text: PARK.answer });
+      expect(await ledgerCount(att2.id)).toBe(1);
+      expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    it("cache hits have their own allowance (60 per hour): the 61st is 429 and leaves no row; a replay of an earlier one still works", async () => {
+      const ev = await withParking();
+      const run = model(PARK);
+      await ASK.askFaq(att, ev.id, q("Where can I leave my car?"), { run });
+      const first = q("where can I leave my car");
+      await ASK.askFaq(att2, ev.id, first, { run });
+      for (let i = 1; i < FAQ_LIMITS.cachedPerHour; i++) await ASK.askFaq(att2, ev.id, q("where can I leave my car"), { run });
+      expect(await ledgerCount(att2.id)).toBe(60);
+      await expect(ASK.askFaq(att2, ev.id, q("where can I leave my car"), { run })).rejects.toMatchObject({ status: 429 });
+      expect(await ledgerCount(att2.id)).toBe(60);
+      expect(await ASK.askFaq(att2, ev.id, first, { run })).toMatchObject({ replayed: true });
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(await count("", att2.id, "ai")).toBe(0);
+    });
+
+    it("ask ledger rows older than 48 hours are pruned (by a cache hit and by a full ask), other kinds are left alone", async () => {
+      const ev = await withParking();
+      const run = model(PARK);
+      const old = async (kind: string, user: TestActor, n = 3) =>
+        sql`insert into op_ledger (actor_id, client_op_id, kind, payload_hash, created_at) select ${user.id}, gen_random_uuid(), ${kind}, 'x', now() - interval '49 hours' from generate_series(1, ${n}::int)`;
+      await old("faq-ask", att);
+      await old("faq-ask", att2);
+      await old("register", att2);
+      await ASK.askFaq(att, ev.id, q("Where can I leave my car?"), { run });
+      expect(await ledgerCount(att.id)).toBe(1);
+      expect(await ledgerCount(att2.id)).toBe(0); // the batch is global: a full ask prunes everyone's old rows
+      await old("faq-ask", att2);
+      expect(await ledgerCount(att2.id)).toBe(3);
+      await ASK.askFaq(att2, ev.id, q("where can I leave my car"), { run });
+      expect(await ledgerCount(att2.id)).toBe(1);
+      expect((await sql`select count(*)::int as n from op_ledger where actor_id = ${att2.id} and kind = 'register'`)[0].n).toBe(3);
     });
 
     it("the cache misses after an FAQ edit (create, update, delete) and hits again on the new version", async () => {
@@ -809,6 +879,24 @@ describe.skipIf(!url)("FAQ entries and the FAQ bot (Postgres)", () => {
       expect(rows).toHaveLength(1);
       expect((await sql`select (created_at = date_trunc('hour', created_at)) as ok from faq_ask where event_id = ${ev.id}`)[0].ok).toBe(true);
       expect(JSON.stringify(rows)).not.toContain(att.id);
+    });
+
+    it("created_at is rounded to the hour in the EVENT's zone (a half-hour zone is not rounded to the UTC hour), so the day grouping is right", async () => {
+      const ev = await mkEvent(org, { timeZone: "Asia/Calcutta" });
+      await add(ev, "Where do I park?", "Garage.");
+      await ASK.askFaq(att, ev.id, q("Can I bring my dog?"), { run: model({ status: "not_in_faq", answer: "", citations: [] }) });
+      const [r] = await sql`select created_at, created_at <= now() as past, created_at > now() - interval '61 minutes' as recent from faq_ask where event_id = ${ev.id}`;
+      const istMinute = Number(new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Calcutta", minute: "numeric" }).format(new Date(r.created_at)));
+      expect({ istMinute, past: r.past, recent: r.recent }).toEqual({ istMinute: 0, past: true, recent: true });
+      // 00:15 IST on the 16th (18:45 UTC on the 15th) is stored as 00:00 IST (18:30 UTC), still the 16th
+      expect(ASK.hourInZone("Asia/Calcutta", new Date("2026-11-15T18:45:30.500Z")).toISOString()).toBe("2026-11-15T18:30:00.000Z");
+      expect(ASK.hourInZone("America/Chicago", new Date("2026-11-15T18:45:30.500Z")).toISOString()).toBe("2026-11-15T18:00:00.000Z");
+      expect(ASK.hourInZone("Asia/Kathmandu", new Date("2026-11-15T18:45:30.500Z")).toISOString()).toBe("2026-11-15T18:15:00.000Z");
+      await sql`delete from faq_ask where event_id = ${ev.id}`;
+      await sql`insert into faq_ask (event_id, question, q_hash, faq_version, status, mode, created_at)
+                values (${ev.id}, 'late', 'h', 1, 'not_in_faq', 'model', timestamptz '2026-11-15 18:30:00+00')`;
+      const days = (await ASK.listQuestions(org, ev.id)).days;
+      expect(days.at(-1)?.day).toBe("2026-11-16");
     });
 
     it("logs carry task facts only: never the question, the answer, a user id or an email", async () => {
