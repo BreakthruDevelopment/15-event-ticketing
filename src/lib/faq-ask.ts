@@ -294,11 +294,14 @@ export function hourInZone(timeZone: string, now: Date = new Date()): Date {
 
 async function claim(actor: Actor, snap: Snapshot, data: { question: string; clientOpId: string }, hash: string, qHash: string): Promise<Claim> {
   const eventId = snap.event.id;
+  // When this claim's charge (hourly allowance row, daily slot) was made. It stays with the claim through takeovers, so
+  // a refund only touches a reservation that still exists in its original hour and UTC day.
+  const charged = new Date().toISOString();
   return db().transaction(async (tx) => {
     const role = await lockActor(tx, actor, rolesFor("faq:ask"));
     const [mine] = await tx
       .insert(L)
-      .values({ actorId: actor.id, clientOpId: data.clientOpId, kind: KIND, payloadHash: hash, result: { claim: null } })
+      .values({ actorId: actor.id, clientOpId: data.clientOpId, kind: KIND, payloadHash: hash, result: { claim: null, charged } })
       .onConflictDoNothing()
       .returning({ id: L.clientOpId, token: claimToken });
     // When this op id already has a claim whose request died (no answer within the lease), the retry takes it over: the
@@ -358,7 +361,7 @@ async function claim(actor: Actor, snap: Snapshot, data: { question: string; cli
         .values({ eventId, question: data.question, qHash, faqVersion: snap.event.faqVersion, status: "not_in_faq", citations: [], mode: "model", flags: ["pending"], createdAt: hourInZone(snap.event.timeZone) })
         .returning({ id: A.id });
       askId = row.id;
-      await tx.update(L).set({ result: { claim: askId } }).where(and(eq(L.actorId, actor.id), eq(L.clientOpId, data.clientOpId)));
+      await tx.update(L).set({ result: { claim: askId, charged } }).where(and(eq(L.actorId, actor.id), eq(L.clientOpId, data.clientOpId)));
     }
     if (!(await reserveDaily(tx, "ai", env().AI_DAILY_CAP))) throw new TooManyRequestsError(BOT_BUSY);
     return { askId, token: mine.token };
@@ -381,11 +384,15 @@ async function abandon(actor: Actor, askId: string | null, opId: string, token: 
             sql`extract(epoch from ${L.createdAt})::text = ${token}`,
           ),
         )
-        .returning({ id: L.clientOpId });
+        .returning({ id: L.clientOpId, result: L.result });
       if (gone.length === 0) return;
       if (askId) await tx.delete(A).where(and(eq(A.id, askId), sql`'pending' = any(${A.flags})`));
-      await releaseRate(tx, actor.id, "ai");
-      await releaseDaily(tx, "ai");
+      // Give back only what still exists: the allowance row lives one hour, the daily slot one UTC day. A claim taken
+      // over after that (its charge predates this request) must not subtract an unrelated, later ask's usage.
+      const at = Date.parse(String((gone[0].result as { charged?: string } | null)?.charged ?? ""));
+      const now = Date.now();
+      if (Number.isNaN(at) || now - at < 3_600_000) await releaseRate(tx, actor.id, "ai");
+      if (Number.isNaN(at) || new Date(at).toISOString().slice(0, 10) === new Date(now).toISOString().slice(0, 10)) await releaseDaily(tx, "ai");
     });
   } catch {
     log.error("faq.ask.release_failed");

@@ -988,6 +988,35 @@ describe.skipIf(!url)("FAQ entries and the FAQ bot (Postgres)", () => {
         expect(row.faq_version).toBe(await faqVersion(ev.id));
       });
 
+      it("a takeover that fails after the original charge's hour or day has passed refunds nothing it doesn't own", async () => {
+        const broken = vi.fn(async () => {
+          throw new AiError("down", "provider", 503);
+        }) as unknown as typeof generate;
+        const backdate = (opId: string, hours: number) =>
+          sql`update op_ledger set result = jsonb_set(result, '{charged}', to_jsonb((now() - make_interval(hours => ${hours}))::text)) where client_op_id = ${opId}`;
+        for (const [hours, hourRefunded] of [[2, false], [30, false], [0, true]] as const) {
+          // 2 hours ago is still today's UTC day except just after midnight
+          const [{ same }] = await sql`select ((now() - make_interval(hours => ${hours})) at time zone 'utc')::date = (now() at time zone 'utc')::date as same`;
+          const dayRefunded = same as boolean;
+          await sql`delete from rate_event where user_id = ${att.id}`;
+          await sql`delete from daily_usage`;
+          const ev = await withParking();
+          const body = q(`Where can I leave my car? ${hours}`);
+          void ASK.askFaq(att, ev.id, body, { run: hang() }).catch(() => {});
+          await tick();
+          await backdate(body.clientOpId, hours);
+          await age(body.clientOpId, 200);
+          // an unrelated successful ask today, made after the crashed one
+          await ASK.askFaq(att, ev.id, q(`Another question ${hours}`), { run: model(PARK) });
+          expect(await count("", att.id, "ai")).toBe(2);
+          expect(await dailyAi()).toBe(2);
+          await expect(ASK.askFaq(att, ev.id, body, { run: broken })).rejects.toBeInstanceOf(AiError);
+          // the takeover owned the old reservation: gone from the hour (and day) only if it is still in them
+          expect(await count("", att.id, "ai"), `hours=${hours}`).toBe(hourRefunded ? 1 : 2);
+          expect(await dailyAi(), `hours=${hours}`).toBe(dayRefunded ? 1 : 2);
+        }
+      });
+
       it("a stale claim for a different question is still op_id_reused, and a takeover re-checks the event (hidden is 404)", async () => {
         const ev = await withParking();
         const body = q("Where can I leave my car?");
