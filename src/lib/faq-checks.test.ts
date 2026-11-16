@@ -1,5 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { type SourceMap, checkFaqAnswer, findLinksAndEmails, findPhones, numberTokens, quotedText } from "./faq-checks";
+import { type SourceMap, checkFaqAnswer, findLinksAndEmails as findLinksAndEmailsNorm, findPhones as findPhonesNorm, normalizeText, numberTokens as numberTokensNorm, quotedText } from "./faq-checks";
+
+// The scanners take normalised text only (a type error otherwise); these helpers send raw test strings through the front door.
+const numberTokens = (s: string, ignore?: Set<string>) => numberTokensNorm(normalizeText(s), ignore);
+const findLinksAndEmails = (s: string) => findLinksAndEmailsNorm(normalizeText(s));
+const findPhones = (s: string) => findPhonesNorm(normalizeText(s));
 
 const sources: SourceMap = new Map([
   ["E1", { id: "E1", kind: "event", label: "when", text: "When: starts Thursday, December 3, 2026 at 7:00 PM CST; ends Thursday, December 3, 2026 at 9:00 PM CST. Doors open Thursday, December 3, 2026 at 6:30 PM CST." }],
@@ -280,7 +286,7 @@ describe("links: an answer link must equal a source link", () => {
     }
     const dbl = findLinksAndEmails("Write hello@known.example@evil.test now");
     expect(dbl.emails).toEqual(["hello@known.example"]);
-    expect(dbl.links).toEqual(["evil.test"]);
+    expect(dbl.links).toEqual(["hello@known.example@evil.test", "evil.test"]); // the glued tail is checked as a link, and the domain inside it too
   });
   it("hosts in any script are seen: an IDN host or TLD cannot slip past unchecked", () => {
     caught(SRC, "Buy at \u0442\u0435\u0441\u0442.\u0440\u0444/pay today.");
@@ -315,5 +321,93 @@ describe("links: an answer link must equal a source link", () => {
     const r = run("Run C:\\Program Files\\setup.exe to install.", "Run C:\\Program Files\\setup.exe to install.");
     expect(r.flags).not.toContain("unsupported_link");
     expect(r.mode).toBe("model");
+  });
+});
+
+describe("the normalisation front door", () => {
+  const SRC = "Parking is $10. Doors open at 9:30 PM CST on December 4. Call 512-555-9999. Refunds up to 2 hours.\nTickets at https://زيتون.example/pay and السلام.example.";
+  const map: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: `Q\n${SRC}` }]]);
+  const run = (answer: string) => checkFaqAnswer({ status: "answered", answer, citations: ["F1"] }, map);
+
+  it("digits in any script are read as the number they are: a different value is refused, the same value passes", () => {
+    for (const bad of [
+      "Parking is ＄１００.", // fullwidth $100
+      "Parking is $١٠٠.", // Arabic-Indic 100
+      "Parking is $१००.", // Devanagari 100
+      "Parking is $¹⁰⁰.", // superscript 100
+      "Parking is $①⓪⓪.", // circled 100
+      "Parking is $ⅩⅩ.", // roman numeral X X = "1010"
+      "Parking is $Ⅽ.", // roman numeral C = 100
+      "Doors open at ９:３０ AM CST.",
+      "Doors open at ٩:٣٠ AM CST.",
+      "Doors on December ４４.",
+      "Call ５１２-５５５-９９８９.",
+      "Call ٥١٢-٥٥٥-٩٩٩٨.",
+      "Refunds up to ２２ hours.",
+      "Refunds up to 〇 hours.", // an ideographic zero: kept as itself, so it is not in the source
+    ]) {
+      expect(run(bad), bad).toMatchObject({ mode: "quoted", answer: null });
+    }
+    for (const good of [
+      "Parking is ＄１０.",
+      "Parking is $١٠.",
+      "Parking is $१०.",
+      "Parking is $Ⅹ.",
+      "Doors open at ９:３０ PM CST on December ４.",
+      "Call ٥١٢-٥٥٥-٩٩٩٩.",
+      "Refunds up to ２ hours.",
+    ]) {
+      expect(run(good).mode, good).toBe("model");
+    }
+  });
+
+  it("every Unicode decimal digit folds to the ASCII digit ICU says it is", () => {
+    const systems = Intl.supportedValuesOf("numberingSystem");
+    let checked = 0;
+    for (const nu of systems) {
+      const fmt = new Intl.NumberFormat(`en-u-nu-${nu}`, { useGrouping: false });
+      const glyphs = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => fmt.format(n));
+      if (!glyphs.every((g) => /^\p{Nd}$/u.test(g))) continue; // algorithmic systems (roman, han) are not digit runs
+      glyphs.forEach((g, n) => {
+        expect(normalizeText(g), `${nu} ${n}`).toBe(String(n));
+        checked++;
+      });
+    }
+    expect(checked).toBeGreaterThan(300);
+    // and no decimal digit anywhere is left unfolded
+    for (let cp = 0x80; cp < 0x1ffff; cp++) {
+      const ch = String.fromCodePoint(cp);
+      if (/\p{Nd}/u.test(ch)) expect(normalizeText(ch), cp.toString(16)).toMatch(/^[0-9]$/);
+    }
+  });
+
+  it("ZWNJ and ZWJ are kept (IDNA keeps them: they change the host); other format characters are dropped", () => {
+    expect(normalizeText("a‌b‍c")).toBe("a‌b‍c");
+    expect(normalizeText("a​b­c﻿d⁠e")).toBe("abcde");
+    expect(normalizeText("evil。test Ａ")).toBe("evil.test A");
+    const host = "زيتون.example";
+    expect(run(`Tickets at https://${host}/pay.`).mode).toBe("model");
+    expect(run(`Tickets at https://زيتو‌ن.example/pay.`)).toMatchObject({ mode: "quoted", flags: expect.arrayContaining(["unsupported_link"]) });
+    expect(run("Tickets at https://زيتو‍ن.example/pay.").mode).toBe("quoted");
+    expect(run("Write evil‌.test now.").mode).toBe("quoted");
+    expect(run("Tickets at https://زيتو​ن.example/pay.").mode).toBe("model"); // ZWSP is dropped: the same host
+  });
+
+  it("no scanner reads raw text: they only accept Norm, and nothing else normalises", () => {
+    // compile-time: a raw string is a type error (checked by `pnpm typecheck`)
+    // @ts-expect-error scanners accept normalised text only
+    expect(() => numberTokensNorm("7pm")).not.toThrow();
+    // @ts-expect-error scanners accept normalised text only
+    expect(() => findPhonesNorm("512-555-0100")).not.toThrow();
+    // @ts-expect-error scanners accept normalised text only
+    expect(() => findLinksAndEmailsNorm("a.example")).not.toThrow();
+    // module boundary: every exported scanner is declared over Norm, and the only normalisation calls live in the front door
+    const code = readFileSync(new URL("./faq-checks.ts", import.meta.url), "utf8");
+    for (const fn of ["findLinksAndEmails", "findPhones", "numberTokens"]) expect(code, fn).toMatch(new RegExp(`export function ${fn}\\(\\w+: Norm`));
+    expect(code.match(/\.normalize\(/g)).toHaveLength(1);
+    expect(code.match(/\\p\{Cf\}/g)).toHaveLength(1);
+    const door = code.slice(code.indexOf("export function normalizeText"), code.indexOf("// ----", code.indexOf("export function normalizeText")));
+    expect(door).toContain(".normalize(");
+    expect(door).toContain("\\p{Cf}");
   });
 });
