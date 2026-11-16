@@ -833,6 +833,93 @@ describe.skipIf(!url)("FAQ entries and the FAQ bot (Postgres)", () => {
         expect(await count("", org.id, "ai")).toBe(1);
       });
 
+      /** A `generate()` stand-in the test settles by hand: no sleeps, `started` resolves once the model call begins. */
+      const gated = () => {
+        let go!: (v: unknown) => void;
+        let stop!: (e: unknown) => void;
+        let begun!: () => void;
+        const started = new Promise<void>((r) => (begun = r));
+        const run = vi.fn(() => {
+          begun();
+          return new Promise((a, b) => {
+            go = a;
+            stop = b;
+          });
+        }) as unknown as typeof generate;
+        return {
+          run,
+          started,
+          fail: () => stop(new AiError("down", "provider", 503)),
+          ok: (out: FaqModelOutput) => go({ data: out, provider: "stub", model: "stub", demo: false, latencyMs: 1 }),
+        };
+      };
+      const state = async (ev: { id: string }, opId: string) => ({
+        asks: await askRows(ev.id),
+        ledger: await sql`select result, created_at from op_ledger where client_op_id = ${opId}`,
+        ai: await count("", att.id, "ai"),
+        daily: await dailyAi(),
+      });
+
+      it("a loser that fails after the takeover settled leaves the winner's ask, ledger row, allowance and daily slot alone", async () => {
+        const ev = await withParking();
+        const body = q("Where can I leave my car?");
+        const loser = gated();
+        const lost = ASK.askFaq(att, ev.id, body, { run: loser.run });
+        const lostOutcome = lost.catch((e) => e);
+        await loser.started;
+        await age(body.clientOpId, 200);
+        expect(await ASK.askFaq(att, ev.id, body, { run: model(PARK) })).toMatchObject({ status: "answered", replayed: false });
+        const before = await state(ev, body.clientOpId);
+        expect(before.asks).toHaveLength(1);
+        expect(before.ai).toBe(1);
+        expect(before.daily).toBe(1);
+        loser.fail();
+        expect(await lostOutcome).toBeInstanceOf(AiError);
+        expect(await state(ev, body.clientOpId)).toEqual(before);
+        const run = model(PARK);
+        expect(await ASK.askFaq(att, ev.id, body, { run })).toMatchObject({ replayed: true, text: PARK.answer });
+        expect(run).not.toHaveBeenCalled();
+      });
+
+      it("a loser that fails while the takeover's model call is running leaves the claim in place", async () => {
+        const ev = await withParking();
+        const body = q("Where can I leave my car?");
+        const loser = gated();
+        const lostOutcome = ASK.askFaq(att, ev.id, body, { run: loser.run }).catch((e) => e);
+        await loser.started;
+        await age(body.clientOpId, 200);
+        const winner = gated();
+        const won = ASK.askFaq(att, ev.id, body, { run: winner.run });
+        await winner.started;
+        const before = await state(ev, body.clientOpId);
+        expect(before.asks).toHaveLength(1);
+        expect(before.asks[0].flags).toContain("pending");
+        loser.fail();
+        expect(await lostOutcome).toBeInstanceOf(AiError);
+        expect(await state(ev, body.clientOpId)).toEqual(before);
+        winner.ok(PARK);
+        expect(await won).toMatchObject({ status: "answered", replayed: false });
+        const after = await state(ev, body.clientOpId);
+        expect(after.asks).toHaveLength(1);
+        expect(after.asks[0]).toMatchObject({ status: "answered", answer: PARK.answer });
+        expect(after.ai).toBe(1);
+        expect(after.daily).toBe(1);
+      });
+
+      it("a takeover stores the answer under the faq_version it was answered against", async () => {
+        const ev = await withParking();
+        const body = q("Where can I leave my car?");
+        const loser = gated();
+        void ASK.askFaq(att, ev.id, body, { run: loser.run }).catch(() => {});
+        await loser.started;
+        const [e] = await sql`select id, version from faq_entry where event_id = ${ev.id}`;
+        await FAQ.updateFaqEntry(org, ev.id, e.id, { answer: "Lamar Street garage, $12 for the evening.", version: e.version, clientOpId: uuid() });
+        await age(body.clientOpId, 200);
+        await ASK.askFaq(att, ev.id, body, { run: model({ status: "answered", answer: "Lamar Street garage, $12 for the evening.", citations: ["F1"] }) });
+        const [row] = await sql`select faq_version from faq_ask where event_id = ${ev.id}`;
+        expect(row.faq_version).toBe(await faqVersion(ev.id));
+      });
+
       it("a stale claim for a different question is still op_id_reused, and a takeover re-checks the event (hidden is 404)", async () => {
         const ev = await withParking();
         const body = q("Where can I leave my car?");

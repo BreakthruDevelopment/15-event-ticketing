@@ -277,7 +277,9 @@ async function recordCacheHit(actor: Actor, opId: string, hash: string, askId: s
   });
 }
 
-type Claim = { replay: AskResponse } | { askId: string | null };
+/** `token` identifies the ledger row's current claim (its `created_at`, as exact epoch text): only its owner may release it. */
+type Claim = { replay: AskResponse } | { askId: string | null; token: string };
+const claimToken = sql<string>`extract(epoch from ${L.createdAt})::text`;
 
 /**
  * Now, rounded down to the hour IN THE EVENT'S ZONE: in a half-hour zone (Asia/Calcutta) a UTC-hour boundary would put a
@@ -298,11 +300,11 @@ async function claim(actor: Actor, snap: Snapshot, data: { question: string; cli
       .insert(L)
       .values({ actorId: actor.id, clientOpId: data.clientOpId, kind: KIND, payloadHash: hash, result: { claim: null } })
       .onConflictDoNothing()
-      .returning({ id: L.clientOpId });
+      .returning({ id: L.clientOpId, token: claimToken });
     // When this op id already has a claim whose request died (no answer within the lease), the retry takes it over: the
     // conditional update lets exactly one retry win, and the winner inherits the original charge, the daily slot and the
     // placeholder row, so nothing is charged twice.
-    let resume: { askId: string | null } | null = null;
+    let resume: { askId: string | null; token: string } | null = null;
     if (!mine) {
       const first = await readLedger(tx, actor.id, data.clientOpId);
       if (!first) throw new CodedConflictError("retry", STILL_RUNNING);
@@ -321,9 +323,9 @@ async function claim(actor: Actor, snap: Snapshot, data: { question: string; cli
               sql`${L.createdAt} < now() - make_interval(secs => ${LEASE_SECONDS})`,
             ),
           )
-          .returning({ result: L.result });
+          .returning({ result: L.result, token: claimToken });
         if (!taken) throw new CodedConflictError("retry", STILL_RUNNING);
-        resume = { askId: (taken.result as { claim?: string | null } | null)?.claim ?? null };
+        resume = { askId: (taken.result as { claim?: string | null } | null)?.claim ?? null, token: taken.token };
       } else if ("ref" in prior) {
         // A pointer to a cached answer here is a parallel duplicate of a cache-hit ask: let the caller resolve it.
         throw new CodedConflictError("retry", STILL_RUNNING);
@@ -359,16 +361,29 @@ async function claim(actor: Actor, snap: Snapshot, data: { question: string; cli
       await tx.update(L).set({ result: { claim: askId } }).where(and(eq(L.actorId, actor.id), eq(L.clientOpId, data.clientOpId)));
     }
     if (!(await reserveDaily(tx, "ai", env().AI_DAILY_CAP))) throw new TooManyRequestsError(BOT_BUSY);
-    return { askId };
+    return { askId, token: mine.token };
   });
 }
 
 /** The model call failed or the answer couldn't be stored: give the charge and the claim back, so a retry runs fresh. */
-async function abandon(actor: Actor, askId: string | null, opId: string): Promise<void> {
+async function abandon(actor: Actor, askId: string | null, opId: string, token: string): Promise<void> {
   try {
     await db().transaction(async (tx) => {
-      await tx.delete(L).where(and(eq(L.actorId, actor.id), eq(L.clientOpId, opId), sql`(${L.result} is null or jsonb_exists(${L.result}, 'claim'))`));
-      if (askId) await tx.delete(A).where(eq(A.id, askId));
+      // Only the claim THIS request made: after a takeover the ledger row, the placeholder, the allowance and the daily
+      // slot belong to the winner, and a loser that fails late must leave all four alone.
+      const gone = await tx
+        .delete(L)
+        .where(
+          and(
+            eq(L.actorId, actor.id),
+            eq(L.clientOpId, opId),
+            sql`(${L.result} is null or jsonb_exists(${L.result}, 'claim'))`,
+            sql`extract(epoch from ${L.createdAt})::text = ${token}`,
+          ),
+        )
+        .returning({ id: L.clientOpId });
+      if (gone.length === 0) return;
+      if (askId) await tx.delete(A).where(and(eq(A.id, askId), sql`'pending' = any(${A.flags})`));
       await releaseRate(tx, actor.id, "ai");
       await releaseDaily(tx, "ai");
     });
@@ -449,7 +464,7 @@ export async function askFaq(actor: Actor | null, rawEventId: string, input: unk
       if (claimed.askId) {
         await tx
           .update(A)
-          .set({ status: result.status, answer: result.mode === "model" ? result.answer : null, citations: result.citations, mode: result.mode, flags })
+          .set({ status: result.status, answer: result.mode === "model" ? result.answer : null, citations: result.citations, mode: result.mode, flags, faqVersion: snap.event.faqVersion })
           .where(eq(A.id, claimed.askId));
       }
       await tx
@@ -459,7 +474,7 @@ export async function askFaq(actor: Actor | null, rawEventId: string, input: unk
       await pruneOld(tx);
     });
   } catch (err) {
-    await abandon(actor, claimed.askId, data.clientOpId);
+    await abandon(actor, claimed.askId, data.clientOpId, claimed.token);
     throw err;
   }
   // No question, answer, user or event text here: task-level facts only.
