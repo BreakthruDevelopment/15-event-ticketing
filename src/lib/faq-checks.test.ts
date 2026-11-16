@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type SourceMap, checkFaqAnswer, findLinksAndEmails, findPhones, numberTokens, quotedText } from "./faq-checks";
+import { type SourceMap, canonLink, checkFaqAnswer, findLinksAndEmails, findPhones, numberTokens, quotedText } from "./faq-checks";
 
 const sources: SourceMap = new Map([
   ["E1", { id: "E1", kind: "event", label: "when", text: "When: starts Thursday, December 3, 2026 at 7:00 PM CST; ends Thursday, December 3, 2026 at 9:00 PM CST. Doors open Thursday, December 3, 2026 at 6:30 PM CST." }],
@@ -36,6 +36,7 @@ describe("links, emails and phones", () => {
     const f = findLinksAndEmails("Write hello@example.org or visit https://tickets.example.org/a, or www.site.com.");
     expect(f.emails).toEqual(["hello@example.org"]);
     expect(f.links).toEqual(["https://tickets.example.org/a", "www.site.com"]);
+    expect(findLinksAndEmails("Go to https://Tickets.Example.org/EventPass.").links).toEqual(["https://Tickets.Example.org/EventPass"]);
     expect(findPhones("Call (512) 555-0100 or 555-0199 or +1 512 555 0100.").length).toBe(3);
   });
 });
@@ -171,5 +172,59 @@ describe("time zones, ambiguous words and number words", () => {
     expect([...numberTokens("one hundred and twenty")]).toEqual(["120"]);
     expect([...numberTokens("two thousand and five")]).toEqual(["2005"]);
     expect([...numberTokens("five and ten")].sort()).toEqual(["10", "5"]);
+  });
+});
+
+describe("links keep the case of path, query and fragment", () => {
+  const map: SourceMap = new Map([
+    ["F1", { id: "F1", kind: "faq", label: "Tickets", text: "Tickets\nBuy at https://tickets.example.com/EventPass and VIP at https://tickets.example.com/buy?tier=VIP#Seats or http://old.example.com/Plain or www.Shop.example.com/Go/ or see https://tickets.example.com/files/a%2Fb." }],
+    ["F2", { id: "F2", kind: "faq", label: "Bare", text: "Bare\nVisit bare.example.com/Path today." }],
+  ]);
+  const chk = (answer: string, id = "F1") => checkFaqAnswer({ status: "answered", answer, citations: [id] }, map);
+  const caught = (answer: string, id = "F1") => expect(chk(answer, id), answer).toMatchObject({ mode: "quoted", answer: null, flags: expect.arrayContaining(["unsupported_link"]) });
+  const fine = (answer: string, id = "F1") => expect(chk(answer, id).mode, answer).toBe("model");
+
+  it("catches a path whose case was changed (the exact case Codex reported)", () => {
+    caught("Buy at https://tickets.example.com/eventpass.");
+    caught("Buy at https://tickets.example.com/EVENTPASS.");
+    fine("Buy at https://tickets.example.com/EventPass.");
+  });
+  it("catches a changed query value or fragment", () => {
+    caught("VIP at https://tickets.example.com/buy?tier=vip#Seats.");
+    caught("VIP at https://tickets.example.com/buy?tier=VIP#seats.");
+    fine("VIP at https://tickets.example.com/buy?tier=VIP#Seats.");
+  });
+  it("matches the host case-insensitively", () => {
+    fine("Buy at https://TICKETS.Example.COM/EventPass.");
+    fine("Buy at HTTPS://tickets.example.com/EventPass.");
+    fine("Shop at www.shop.EXAMPLE.com/Go.");
+    fine("Shop at https://Bare.example.com/Path.", "F2");
+    caught("Shop at https://BARE.example.com/path.", "F2");
+  });
+  it("percent-encoding: hex digits are case-insensitive, the decoded value is not", () => {
+    fine("Files at https://tickets.example.com/files/a%2fb.");
+    caught("Files at https://tickets.example.com/files/a/b.");
+    caught("Files at https://tickets.example.com/files/A%2Fb.");
+  });
+  it("a trailing slash and a default port do not matter; another port does", () => {
+    fine("Buy at https://tickets.example.com/EventPass/.");
+    // (an answer that adds ":443" is still caught by the number check; the link form itself ignores a default port)
+    expect(canonLink("https://tickets.example.com:443/EventPass").key).toBe(canonLink("https://tickets.example.com/EventPass").key);
+    expect(canonLink("https://tickets.example.com:8443/EventPass").key).not.toBe(canonLink("https://tickets.example.com/EventPass").key);
+    caught("Buy at https://tickets.example.com:8443/EventPass.");
+    fine("Shop at https://shop.example.com/Go.");
+    caught("Shop at https://shop.example.com/Go/x.");
+  });
+  it("the scheme may be left out but not changed: http never stands in for https", () => {
+    fine("Buy at tickets.example.com/EventPass.");
+    caught("Buy at http://tickets.example.com/EventPass.");
+    fine("Old shop at http://old.example.com/Plain.");
+    caught("Old shop at https://old.example.com/plain.");
+    fine("Visit https://bare.example.com/Path.", "F2");
+    caught("Visit http://bare.example.com/Path.", "F2");
+  });
+  it("a different host or a longer path is still unsupported", () => {
+    caught("Buy at https://tickets.example.org/EventPass.");
+    caught("Buy at https://tickets.example.com/EventPass/extra.");
   });
 });

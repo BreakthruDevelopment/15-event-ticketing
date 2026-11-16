@@ -52,7 +52,10 @@ const PHONE = /(?:\+?\d{1,3}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b|\b\d{3}[
 
 const trimTail = (s: string) => s.replace(/[.,;:!?)\]]+$/g, "");
 
-/** Emails first, then links (scheme or bare domain) that aren't part of an email; lower-cased, tail punctuation removed. */
+/**
+ * Emails first, then links (scheme or bare domain) that aren't part of an email. Emails are lower-cased; links keep their
+ * case (a path or query is case-sensitive: see `canonLink`). Tail punctuation removed from both.
+ */
 export function findLinksAndEmails(input: string): { emails: string[]; links: string[]; rest: string } {
   const emails = (input.match(EMAIL) ?? []).map((m) => trimTail(m.toLowerCase()));
   let rest = input.replace(EMAIL, " ");
@@ -60,16 +63,16 @@ export function findLinksAndEmails(input: string): { emails: string[]; links: st
   rest = rest.replace(URL_SCHEME, " ");
   links.push(...(rest.match(DOMAIN) ?? []));
   rest = rest.replace(DOMAIN, " ");
-  return { emails, links: links.map((m) => trimTail(m.toLowerCase())), rest };
+  return { emails, links: links.map(trimTail), rest };
 }
 
 export function findPhones(input: string): string[] {
   return (input.match(PHONE) ?? []).map((m) => m.replace(/\D/g, "")).filter((d) => d.length >= 7);
 }
 
-const isTokenChar = (c: string | undefined) => !!c && /[a-z0-9_\-/%@]/.test(c);
+const isTokenChar = (c: string | undefined) => !!c && /[a-z0-9_\-/%@]/i.test(c);
 
-/** `needle` occurs in `haystack` as a whole link or email: not as the start or middle of a longer one. Both lower-case. */
+/** `needle` occurs in `haystack` as a whole link or email: not as the start or middle of a longer one. Case-sensitive. */
 function containsWhole(haystack: string, needle: string): boolean {
   if (!needle) return true;
   let from = 0;
@@ -78,13 +81,56 @@ function containsWhole(haystack: string, needle: string): boolean {
     if (i < 0) return false;
     const before = haystack[i - 1];
     const after = haystack[i + needle.length];
-    const afterDot = after === "." && /[a-z0-9]/.test(haystack[i + needle.length + 1] ?? "");
+    const afterDot = after === "." && /[a-z0-9]/i.test(haystack[i + needle.length + 1] ?? "");
     if (!isTokenChar(before) && before !== "." && !isTokenChar(after) && !afterDot) return true;
     from = i + 1;
   }
 }
 
-const normLink = (l: string) => l.replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/+$/, "");
+/**
+ * A link in comparable form. Only what is case-insensitive is normalised: the host (lower-cased, IDN to punycode, a
+ * leading "www." and a default port dropped) and the hex digits of percent-encoding (%2f is %2F, but is NOT "/"; nothing is
+ * decoded). The path, query and fragment keep their case: "/EventPass" and "/eventpass" are different pages. A trailing
+ * slash on the path is ignored, as before. The scheme is kept apart: an answer may omit it, but may not change it (see
+ * `linkMatches`).
+ */
+export function canonLink(link: string): { scheme: "http" | "https" | ""; key: string } {
+  const m = /^(https?):\/\//i.exec(link);
+  const scheme = (m ? m[1].toLowerCase() : "") as "http" | "https" | "";
+  const rest = link.slice(m ? m[0].length : 0);
+  const cut = rest.search(/[/?#]/);
+  let host = cut < 0 ? rest : rest.slice(0, cut);
+  let tail = cut < 0 ? "" : rest.slice(cut);
+  try {
+    host = new URL(`http://${host}`).host; // lower-cased, punycode, default port of http dropped
+  } catch {
+    host = host.toLowerCase();
+  }
+  host = host.replace(/^www\./, "").replace(/:(?:80|443)$/, "");
+  tail = tail.replace(/%[0-9a-f]{2}/gi, (e) => e.toUpperCase());
+  const path = /^[^?#]*/.exec(tail)?.[0] ?? "";
+  tail = path.replace(/\/+$/, "") + tail.slice(path.length);
+  return { scheme, key: host + tail };
+}
+
+/**
+ * The answer's link `a` is one the sources contain: same host, path, query and fragment (host case-insensitive, the rest
+ * exact). A scheme the answer states must be the source's: "http://" never passes for an "https://" link, and a source
+ * that gave no scheme supports only an https (or no) scheme.
+ */
+function linkMatches(a: ReturnType<typeof canonLink>, s: ReturnType<typeof canonLink>): boolean {
+  if (a.key !== s.key) return false;
+  if (!a.scheme) return true;
+  return s.scheme ? a.scheme === s.scheme : a.scheme === "https";
+}
+
+/** `text` with every link in it replaced by its canonical key, so a whole-link search can run case-sensitively. */
+function canonText(text: string): string {
+  const { links } = findLinksAndEmails(text);
+  let out = text;
+  for (const l of links) out = out.split(l).join(canonLink(l).key);
+  return out;
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Number, time, price and date tokens
@@ -219,13 +265,19 @@ export function numberTokens(input: string, ignore: Set<string> = new Set()): Se
 /** Why `answer` is not supported by `sourceText` (the cited sources joined), or an empty list when it is. */
 export function unsupportedParts(answer: string, sourceText: string, citedIds: string[]): string[] {
   const flags: string[] = [];
-  const src = sourceText.toLowerCase();
+  const src = canonText(sourceText);
 
   const a = findLinksAndEmails(answer);
   const s = findLinksAndEmails(sourceText);
   if (a.emails.some((e) => !s.emails.some((x) => x === e))) flags.push("unsupported_email");
-  const srcLinks = s.links.map(normLink);
-  if (a.links.some((l) => !srcLinks.some((x) => x === normLink(l) || containsWhole(src, normLink(l))))) flags.push("unsupported_link");
+  const srcLinks = s.links.map(canonLink);
+  const linkOk = (l: string) => {
+    const c = canonLink(l);
+    if (srcLinks.some((x) => linkMatches(c, x))) return true;
+    // Fallback for a link the sources contain but the finder read differently: never for an explicit http:// link.
+    return c.scheme !== "http" && containsWhole(src, c.key);
+  };
+  if (a.links.some((l) => !linkOk(l))) flags.push("unsupported_link");
 
   const srcPhones = findPhones(sourceText);
   if (findPhones(answer).some((d) => !srcPhones.some((p) => p.endsWith(d) || d.endsWith(p)))) flags.push("unsupported_phone");
