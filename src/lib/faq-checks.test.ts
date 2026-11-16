@@ -274,13 +274,28 @@ describe("links: an answer link must equal a source link", () => {
       ["tickets\u2014evil.test/EventPass", "evil.test/EventPass"],
       ["see/evil.test/EventPass", "evil.test/EventPass"],
       ["see(evil.test/EventPass", "evil.test/EventPass"],
-      ["xhttps://evil.test/EventPass", "evil.test/EventPass"],
+      ["xhttps://evil.test/EventPass", "xhttps://evil.test/EventPass"], // a glued scheme is one token, never equal to a source link
     ] as const) {
       expect(findLinksAndEmails(`Go ${src}.`).links, src).toEqual([tok]);
     }
     const dbl = findLinksAndEmails("Write hello@known.example@evil.test now");
     expect(dbl.emails).toEqual(["hello@known.example"]);
     expect(dbl.links).toEqual(["evil.test"]);
+  });
+  it("hosts in any script are seen: an IDN host or TLD cannot slip past unchecked", () => {
+    caught(SRC, "Buy at \u0442\u0435\u0441\u0442.\u0440\u0444/pay today.");
+    caught(SRC, "Buy at b\u00fccher.example/pay today.");
+    caught(SRC, "Buy at \u4f8b\u3048.jp today.");
+    caught(SRC, "Buy at evil\u3002test/pay today."); // ideographic full stop
+    caught(SRC, "Buy at evil\u200b.test/pay today."); // zero-width space inside the host
+    caught(SRC, "Buy at evil.te\u00adst/pay today."); // soft hyphen
+    expect(findLinksAndEmails("Buy at \u0442\u0435\u0441\u0442.\u0440\u0444/pay today.").links).toEqual(["\u0442\u0435\u0441\u0442.\u0440\u0444/pay"]);
+  });
+  it("a decoy after the domain cannot hide it; a dotless scheme host is still a link", () => {
+    caught(SRC, "Buy at evil.test-x/x#tickets.example.com/EventPass today.");
+    caught(SRC, "Buy at https://evil/EventPass today.");
+    caught(SRC, "Buy at ftp://localhost/EventPass today.");
+    caught(SRC, "Buy at See\u200bhttp://evil today.");
   });
   it("a domain hidden inside a token is refused as an ungrounded link (seven bypasses of 86a39b1)", () => {
     const FX = "Refunds\nEmail hello@austinproductmeetup.example.";

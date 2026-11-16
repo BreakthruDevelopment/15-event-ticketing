@@ -45,11 +45,16 @@ const stripNul = (s: string) => s.replace(/\0/g, "");
 // ---------------------------------------------------------------------------------------------------------------------
 // Links, emails, phone numbers
 
-const EMAIL = /[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi;
-const EMAIL_WHOLE = /^[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
-const LINK_START = /\b(?:https?:\/\/|www\.)\S*/i;
-const DOMAIN_START = /^(?:[a-z0-9-]+\.)+[a-z]{2,}(?![a-z0-9-])/i;
-const DOMAIN_ANY = /(?:[a-z0-9-]+\.)+[a-z]{2,}(?![a-z0-9-])/i;
+// Unicode-aware: a host may be written in any script (internationalised domains and TLDs), and an ASCII-only class would
+// leave "тест.рф" invisible to every check.
+const EMAIL = /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}\p{M}-]+(?:\.[\p{L}\p{N}\p{M}-]+)+/giu;
+const EMAIL_WHOLE = /^[\p{L}\p{N}._%+-]+@[\p{L}\p{N}\p{M}-]+(?:\.[\p{L}\p{N}\p{M}-]+)+$/iu;
+// Any "scheme://" starts a link, glued to a preceding word or not, a dotless host ("http://evil") or not; "www." too.
+const LINK_START = /(?:[a-z][a-z0-9+.-]*:\/\/|\bwww\.)\S*/i;
+const DOMAIN_START = /^(?:[\p{L}\p{N}\p{M}-]+\.)+[\p{L}\p{M}]{2,}/iu;
+// No lookahead after the TLD: the link is sliced from the match start to the end of the token, so a lookahead could only
+// hide a domain ("evil.test-x/x#tickets.example.com/EventPass").
+const DOMAIN_ANY = /(?:[\p{L}\p{N}\p{M}-]+\.)+[\p{L}\p{M}]{2,}/iu;
 const PHONE = /(?:\+?\d{1,3}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b|\b\d{3}[\s.-]\d{4}\b|\+\d[\d\s().-]{8,}\d/g;
 
 /** Strip sentence punctuation from the end of a token: . , ; : ! ? quotes, ">" and an unbalanced ")" or "]". */
@@ -78,7 +83,10 @@ function trimTail(t: string): string {
 export function findLinksAndEmails(input: string): { emails: string[]; links: string[] } {
   const emails: string[] = [];
   const links: string[] = [];
-  for (const raw of input.split(/\s+/)) {
+  // Read the text as a browser reads a host: compatibility-normalised, invisible format characters (zero-width space,
+  // soft hyphen, BOM, word joiner) dropped, ideographic full stops as ".". Applied to source and answer alike.
+  const text = input.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/[\u3002\uff61]/g, ".");
+  for (const raw of text.split(/\s+/)) {
     const withScheme = LINK_START.exec(raw);
     if (withScheme) {
       links.push(trimTail(raw.slice(withScheme.index)));
