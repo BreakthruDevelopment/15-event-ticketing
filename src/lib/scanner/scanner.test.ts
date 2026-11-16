@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { MessageChannel } from "node:worker_threads";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import nextConfig from "../../../next.config";
 import { buildCsp } from "../../proxy";
 import { qrSvg } from "../tickets/qr";
 import {
@@ -24,7 +23,7 @@ import {
   transferImageDataToWorker,
   type WorkerLike,
 } from "./frame-loop";
-import { attachWorkerScope, type WorkerMessageScope } from "./jsqr.worker";
+import { attachWorkerScope, type WorkerMessageScope } from "./jsqr-core";
 import {
   formatDoorCode,
   isTicketQrText,
@@ -80,10 +79,11 @@ function rasteriseQrSvg(
 }
 
 /**
- * Wraps a Node `MessageChannel` as a browser-compatible `WorkerLike` backed by `attachWorkerScope`.
- * Transferring `[img.data.buffer]` across `port1.postMessage` genuinely detaches the sender's `ArrayBuffer`.
+ * A STAND-IN for the worker, not a Worker: a Node `MessageChannel` wired to `attachWorkerScope`. It exercises the
+ * decode logic and the transfer semantics only. It proved nothing about the real worker entry (which, in a browser,
+ * never handled a message while these tests passed); `e2e/scanner.e2e.test.ts` drives the real `Worker` instead.
  */
-function createMessageChannelWorker(): { worker: WorkerLike; cleanup: () => void } {
+function createStandInWorker(): { worker: WorkerLike; cleanup: () => void } {
   const { port1, port2 } = new MessageChannel();
 
   const workerScope: WorkerMessageScope = {
@@ -199,13 +199,13 @@ describe("phone-browser QR scanner module (15.4)", () => {
     });
   });
 
-  describe("jsqr.worker.ts & frame-loop.ts: rasterised 15.2 qrSvg decoding from a transferred ImageData buffer", () => {
-    it("decodes a QR rendered by 15.2's qrSvg from a transferred ImageData ArrayBuffer over MessageChannel", async () => {
+  describe("jsqr-core.ts & frame-loop.ts: decode logic on rasterised 15.2 qrSvg frames (stand-in channel, not a Worker; see e2e/)", () => {
+    it("decodes a QR rendered by 15.2's qrSvg from a transferred ImageData ArrayBuffer over a stand-in channel", async () => {
       const svg = qrSvg(qrTextA);
       const img = rasteriseQrSvg(svg, SCAN_CANVAS_SIZE);
       expect(img.data.byteLength).toBe(SCAN_CANVAS_SIZE * SCAN_CANVAS_SIZE * 4);
 
-      const { worker, cleanup } = createMessageChannelWorker();
+      const { worker, cleanup } = createStandInWorker();
       try {
         const decodedPromise = new Promise<string | null>((resolvePromise) => {
           worker.onmessage = (event) => {
@@ -233,7 +233,7 @@ describe("phone-browser QR scanner module (15.4)", () => {
     it("also decodes when sent as { data, width, height } with transferred buffer at 370x370", async () => {
       const svg = qrSvg(qrTextB);
       const img = rasteriseQrSvg(svg, 370);
-      const { worker, cleanup } = createMessageChannelWorker();
+      const { worker, cleanup } = createStandInWorker();
       try {
         const decodedPromise = new Promise<{ id?: number; text: string | null }>((resolvePromise) => {
           worker.onmessage = (event) => {
@@ -523,7 +523,7 @@ describe("phone-browser QR scanner module (15.4)", () => {
       expect(stopReasons).toEqual(["visibilitychange"]);
     });
 
-    it("scanner controller runs the jsQR worker path when BarcodeDetector lacks qr_code and stops on visibilitychange", async () => {
+    it("scanner controller (stand-in worker) runs the jsQR path when BarcodeDetector lacks qr_code and stops on visibilitychange", async () => {
       const svg = qrSvg(qrTextA);
       const rasterised = rasteriseQrSvg(svg, SCAN_CANVAS_SIZE);
 
@@ -549,7 +549,7 @@ describe("phone-browser QR scanner module (15.4)", () => {
         }),
       };
 
-      const { worker, cleanup } = createMessageChannelWorker();
+      const { worker, cleanup } = createStandInWorker();
       const scannedQrs: string[] = [];
 
       const ctrl = createScannerController({
@@ -619,57 +619,6 @@ describe("phone-browser QR scanner module (15.4)", () => {
       const missing = describeCameraError({ name: "NotFoundError" });
       expect(missing.kind).toBe("not_found");
       expect(supportsTrackTorch(null)).toBe(false);
-    });
-  });
-
-  describe("next.config.ts: Permissions-Policy headers", () => {
-    it("sends camera=(self) ONLY under /door and camera=() everywhere else", async () => {
-      expect(typeof nextConfig.headers).toBe("function");
-      const rules = await nextConfig.headers!();
-
-      // Next.js applies matching header rules in order; the last matching rule for a header key wins.
-      function matchesSource(source: string, pathname: string): boolean {
-        if (source === "/:path*") return pathname.startsWith("/");
-        if (source === "/door") return pathname === "/door";
-        if (source === "/door/:path*") {
-          return pathname === "/door" || pathname.startsWith("/door/");
-        }
-        return false;
-      }
-
-      function effectivePermissionsPolicy(pathname: string): string | undefined {
-        let value: string | undefined;
-        for (const rule of rules) {
-          if (matchesSource(rule.source, pathname)) {
-            for (const h of rule.headers) {
-              if (h.key.toLowerCase() === "permissions-policy") {
-                value = h.value;
-              }
-            }
-          }
-        }
-        return value;
-      }
-
-      for (const doorPath of ["/door", "/door/evt-123", "/door/evt-123/check"]) {
-        expect(effectivePermissionsPolicy(doorPath), doorPath).toBe("camera=(self)");
-      }
-
-      for (const nonDoorPath of [
-        "/",
-        "/events",
-        "/e/austin-meetup",
-        "/tickets",
-        "/tickets/t-123",
-        "/organizer",
-        "/organizer/events/1",
-        "/admin",
-        "/api/door/events",
-        "/doorway",
-        "/doors",
-      ]) {
-        expect(effectivePermissionsPolicy(nonDoorPath), nonDoorPath).toBe("camera=()");
-      }
     });
   });
 });

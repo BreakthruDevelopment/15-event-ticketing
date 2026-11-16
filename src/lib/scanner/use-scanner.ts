@@ -6,6 +6,7 @@ import {
   type CameraSession,
   type CameraStopReason,
   describeCameraError,
+  describeDecoderError,
   type StartCameraOptions,
   startCamera,
   VIDEO_ELEMENT_ATTRS,
@@ -14,6 +15,7 @@ import { createScanDedupe, DEDUPE_WINDOW_MS, type ScanDedupe } from "./dedupe";
 import type { BarcodeDetectorScope, DecoderKind } from "./detect";
 import {
   type CanvasElementLike,
+  type DecoderFailureReason,
   type FrameLoopHandle,
   SCAN_CANVAS_SIZE,
   SCAN_INTERVAL_MS,
@@ -34,6 +36,8 @@ import {
  */
 
 export const RESULT_DISPLAY_MS = 1_500;
+/** Shown when the check-in callback throws or rejects (a dropped request at the door). No error detail, no token. */
+export const CHECK_IN_FAILED_MESSAGE = "Check-in did not go through. Present the ticket again.";
 
 export type ScannerStatus = "idle" | "starting" | "scanning" | "paused" | "error";
 
@@ -57,7 +61,6 @@ export interface ScannerState {
   torchEnabled: boolean;
   cameraError: CameraErrorInfo | null;
   banner: ScannerBanner | null;
-  lastScan: string | null;
 }
 
 export interface ScannerControllerOptions {
@@ -67,6 +70,12 @@ export interface ScannerControllerOptions {
   onDoorCode?: (code: string) => void | Promise<void>;
   /** Unified callback for either a valid QR scan or manual door code / wedge scan. */
   onEntry?: (entry: ScannedEntry) => void | Promise<void>;
+  /**
+   * Called when `onScan`, `onDoorCode` or `onEntry` throws or rejects. The scanner has already shown the error banner,
+   * played the warning tone and let the same ticket be scanned again; this is for the caller's own reporting.
+   * It is passed the error only, never the ticket token.
+   */
+  onScanError?: (error: unknown) => void;
   /** Called when a scanned QR code is rejected locally (not matching `ET1:`). */
   onInvalidQr?: (rawValue: string, message: string) => void;
   /** Called when an identical `ET1:` QR code is ignored within the 3 s dedupe window. */
@@ -76,6 +85,8 @@ export interface ScannerControllerOptions {
   dedupeWindowMs?: number;
   intervalMs?: number;
   canvasSize?: number;
+  /** Per-frame reply deadline for the `jsqr` worker (default 1 s). */
+  decodeTimeoutMs?: number;
   resultDisplayMs?: number;
   now?: () => number;
   detectorScope?: BarcodeDetectorScope;
@@ -110,7 +121,6 @@ export function getInitialScannerState(): ScannerState {
     torchEnabled: false,
     cameraError: null,
     banner: null,
-    lastScan: null,
   };
 }
 
@@ -186,6 +196,8 @@ export function createScannerController(
   let audioCtx: AudioContext | null = null;
   let activeVideo: HTMLVideoElement | VideoSourceLike | null = null;
   let startGeneration = 0;
+  /** After a failed check-in the camera loop pauses until this time, so a dead network is not hammered at 8 fps. */
+  let retryHoldUntil = 0;
 
   function updateState(patch: Partial<ScannerState>): void {
     state = { ...state, ...patch };
@@ -225,10 +237,7 @@ export function createScannerController(
 
   async function dispatchEntry(entry: ScannedEntry): Promise<void> {
     if (state.busy) return;
-    updateState({
-      busy: true,
-      lastScan: entry.method === "qr" ? entry.qr : entry.code,
-    });
+    updateState({ busy: true });
     try {
       if (entry.method === "qr") {
         await options.onScan?.(entry.qr);
@@ -236,9 +245,42 @@ export function createScannerController(
         await options.onDoorCode?.(entry.code);
       }
       await options.onEntry?.(entry);
+    } catch (err) {
+      // Never silent: the staffer sees and hears that it failed, and the same ticket is accepted again at once
+      // (otherwise the 3 s dedupe would swallow the retry). The loop rests for one banner so a dead network is not
+      // hit 8 times a second while the ticket is still in view.
+      if (entry.method === "qr") dedupe.forget(entry.qr);
+      retryHoldUntil = now() + resultDisplayMs;
+      showBanner("error", CHECK_IN_FAILED_MESSAGE, resultDisplayMs);
+      triggerDeviceFeedback("error", audioCtx);
+      try {
+        options.onScanError?.(err);
+      } catch {
+        // A throwing reporter must not undo the banner.
+      }
     } finally {
       updateState({ busy: false });
     }
+  }
+
+  /** The decoder died after the camera started: turn the camera off, then say what actually failed. */
+  function failDecoder(info: ReturnType<typeof describeDecoderError>): void {
+    startGeneration++;
+    if (frameLoop) {
+      frameLoop.stop();
+      frameLoop = null;
+    }
+    const session = cameraSession;
+    cameraSession = null;
+    // `stop` runs the camera's `onStop`, which sets status "idle"; the error state goes on top afterwards.
+    session?.stop("decoder");
+    updateState({
+      status: "error",
+      scanning: false,
+      torchSupported: false,
+      torchEnabled: false,
+      cameraError: info,
+    });
   }
 
   async function start(video?: HTMLVideoElement | VideoSourceLike | null): Promise<boolean> {
@@ -260,8 +302,9 @@ export function createScannerController(
       banner: null,
     });
 
+    let session: CameraSession;
     try {
-      const session = await startCamera({
+      session = await startCamera({
         ...options.cameraOptions,
         video: (activeVideo as HTMLVideoElement | null) ?? null,
         onStop: (reason) => {
@@ -279,24 +322,40 @@ export function createScannerController(
           options.onCameraStop?.(reason);
         },
       });
-
-      if (gen !== startGeneration) {
-        session.stop("manual");
-        return false;
+    } catch (err) {
+      // `startCamera` releases its own stream when it throws; nothing is running here.
+      if (gen === startGeneration) {
+        updateState({
+          status: "error",
+          scanning: false,
+          torchSupported: false,
+          torchEnabled: false,
+          cameraError: describeCameraError(err, options.userAgent),
+        });
       }
+      return false;
+    }
 
-      cameraSession = session;
+    if (gen !== startGeneration) {
+      session.stop("manual");
+      return false;
+    }
+    cameraSession = session;
 
-      const loop = await startFrameLoop({
+    // From here the camera is live: every way out below must stop it.
+    let loop: FrameLoopHandle;
+    try {
+      loop = await startFrameLoop({
         video: activeVideo ?? { readyState: 4 },
         dedupe,
         now,
         intervalMs: options.intervalMs ?? SCAN_INTERVAL_MS,
         canvasSize: options.canvasSize ?? SCAN_CANVAS_SIZE,
+        decodeTimeoutMs: options.decodeTimeoutMs,
         detectorScope: options.detectorScope,
         createWorker: options.createWorker,
         createCanvas: options.createCanvas,
-        isPaused: () => state.busy,
+        isPaused: () => state.busy || now() < retryHoldUntil,
         onTicketQr: (qr) => {
           void dispatchEntry({ method: "qr", qr });
         },
@@ -308,35 +367,45 @@ export function createScannerController(
         onDuplicateQr: (qr) => {
           options.onDuplicate?.(qr);
         },
+        onDecoderFailed: (reason: DecoderFailureReason) => {
+          if (gen !== startGeneration) return;
+          failDecoder(describeDecoderError(reason === "worker_timeout" || reason === "worker_error"));
+        },
       });
-
-      if (gen !== startGeneration || session.isStopped()) {
-        loop.stop();
+    } catch {
+      if (gen !== startGeneration) {
         session.stop("manual");
         return false;
       }
-
-      frameLoop = loop;
-      updateState({
-        status: "scanning",
-        scanning: true,
-        decoderKind: loop.decoderKind,
-        torchSupported: session.torchSupported,
-        torchEnabled: session.torchEnabled,
-        cameraError: null,
-      });
-      return true;
-    } catch (err) {
-      const info = describeCameraError(err, options.userAgent);
+      startGeneration++;
+      cameraSession = null;
+      session.stop("decoder");
       updateState({
         status: "error",
         scanning: false,
         torchSupported: false,
         torchEnabled: false,
-        cameraError: info,
+        cameraError: describeDecoderError(false),
       });
       return false;
     }
+
+    if (gen !== startGeneration || session.isStopped()) {
+      loop.stop();
+      session.stop("manual");
+      return false;
+    }
+
+    frameLoop = loop;
+    updateState({
+      status: "scanning",
+      scanning: true,
+      decoderKind: loop.decoderKind,
+      torchSupported: session.torchSupported,
+      torchEnabled: session.torchEnabled,
+      cameraError: null,
+    });
+    return true;
   }
 
   function stop(reason: CameraStopReason = "manual"): void {

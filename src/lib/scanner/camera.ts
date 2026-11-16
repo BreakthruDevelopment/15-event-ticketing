@@ -27,6 +27,8 @@ export type CameraErrorKind =
   | "in_use"
   | "insecure_context"
   | "unsupported"
+  /** The camera is fine; the QR decoder (worker or canvas) is not. Manual entry still works. */
+  | "decoder"
   | "unknown";
 
 export interface CameraErrorInfo {
@@ -35,7 +37,7 @@ export interface CameraErrorInfo {
   browserHint: string;
 }
 
-export type CameraStopReason = "manual" | "visibilitychange" | "pagehide" | "unmount";
+export type CameraStopReason = "manual" | "visibilitychange" | "pagehide" | "unmount" | "decoder";
 
 export interface CameraSession {
   readonly stream: MediaStream;
@@ -167,6 +169,21 @@ export function describeCameraError(
 }
 
 /**
+ * Error info for a decoder (worker or canvas) failure after the camera itself started fine. Says so, rather than
+ * blaming the camera, and points at manual entry.
+ */
+export function describeDecoderError(stalled: boolean): CameraErrorInfo {
+  return {
+    kind: "decoder",
+    message: stalled
+      ? "The QR scanner stopped responding, so the camera was turned off."
+      : "The QR scanner could not start on this device, so the camera was turned off.",
+    browserHint:
+      "Use manual door-code entry or attendee name search below, or reload this page and tap Start scanning again.",
+  };
+}
+
+/**
  * Requests the rear camera stream, attaches it to `video` (if provided), and automatically
  * stops the stream on `visibilitychange` (when the document becomes hidden) or `pagehide`.
  */
@@ -192,20 +209,38 @@ export async function startCamera(options: StartCameraOptions = {}): Promise<Cam
   const stream = await mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
   const tracks = typeof stream.getVideoTracks === "function" ? stream.getVideoTracks() : [];
   const track = tracks[0] ?? null;
-  const torchSupported = supportsTrackTorch(track);
+  const video = options.video ?? null;
+  let torchSupported = false;
   let torchEnabled = false;
   let stopped = false;
 
-  const video = options.video ?? null;
-  if (video) {
-    configureVideoElement(video, stream);
-    if (typeof video.play === "function") {
+  // Anything that throws between getting the stream and handing back a session must not leave the camera on.
+  const releaseStream = () => {
+    const all = typeof stream.getTracks === "function" ? stream.getTracks() : tracks;
+    for (const t of all) {
       try {
-        await video.play();
+        t.stop();
       } catch {
-        // Autoplay failure on mock or backgrounded element is non-fatal if tracks are live.
+        // Ignore errors stopping an already-ended track.
       }
     }
+  };
+
+  try {
+    torchSupported = supportsTrackTorch(track);
+    if (video) {
+      configureVideoElement(video, stream);
+      if (typeof video.play === "function") {
+        try {
+          await video.play();
+        } catch {
+          // Autoplay failure on mock or backgrounded element is non-fatal if tracks are live.
+        }
+      }
+    }
+  } catch (err) {
+    releaseStream();
+    throw err;
   }
 
   const doc =
@@ -250,14 +285,7 @@ export async function startCamera(options: StartCameraOptions = {}): Promise<Cam
       win.removeEventListener("pagehide", onPageHide);
     }
 
-    const allTracks = typeof stream.getTracks === "function" ? stream.getTracks() : tracks;
-    for (const t of allTracks) {
-      try {
-        t.stop();
-      } catch {
-        // Ignore errors stopping an already-ended track.
-      }
-    }
+    releaseStream();
 
     if (video) {
       try {

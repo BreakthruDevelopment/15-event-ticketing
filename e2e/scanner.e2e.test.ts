@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { type Browser, type BrowserContext, chromium, devices, type Page, type Worker } from "playwright-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -79,23 +79,30 @@ describe("finding 1: the worker handles messages in a real browser", () => {
     const { page, context } = await iphone();
     const r = await page.evaluate((m) => window.__selfTest!.workerRoundTrip(m, 4_000), TOKEN_MATRIX);
     await context.close();
+    console.log(`worker round trip (create, post 640x640 frame, decode, reply): ${r.ms} ms`);
     expect(r.errors).toBe(0);
     expect(r.ok).toBe(true);
     expect(r.text).toBe(TOKEN);
   });
 
-  it("the emitted worker chunk registers the message handler, and no raw .ts asset ships", async () => {
+  it("the emitted worker entry chunk registers the message handler next to the jsQR decoder", async () => {
     const { page, workers, context } = await iphone();
+    const loaded: string[] = [];
+    page.on("requestfinished", (r) => {
+      if (/\/_next\/static\/chunks\/.*\.js$/.test(r.url())) loaded.push(r.url());
+    });
     await page.evaluate((m) => window.__selfTest!.workerRoundTrip(m, 4_000), TOKEN_MATRIX);
     expect(workers.length).toBeGreaterThan(0);
-    const url = new URL(workers[0].url());
-    expect(url.pathname).toMatch(/^\/_next\/static\//);
-    const body = await (await page.request.get(url.toString())).text();
-    // The jsQR payload lives in this chunk or one it loads; the handler registration must be in the entry chunk.
-    expect(body).toMatch(/addEventListener\(\s*["']message["']|onmessage\s*=/);
-    const media = readdirSync(path.join(ROOT, ".next", "static", "media"));
-    expect(media.filter((f) => /jsqr\.worker.*\.ts$/.test(f))).toEqual([]);
+    // Same-origin chunk, not a blob: or data: URL, so `worker-src 'self'` holds.
+    expect(new URL(workers[0].url()).pathname).toMatch(/^\/_next\/static\/chunks\/turbopack-worker-.*\.js$/);
+    // The chunk the worker imports must register a listener itself: the bundler dropped the old guarded one.
+    const chunks = loaded.map((u) => new URL(u).pathname.replace(/^\/_next\/static\//, ""));
+    const entry = chunks
+      .map((c) => readFileSync(path.join(ROOT, ".next", "static", c), "utf8"))
+      .find((body) => body.includes("inversionAttempts"));
     await context.close();
+    expect(entry, "no chunk the worker loaded contains the jsQR decoder").toBeDefined();
+    expect(entry).toMatch(/addEventListener\(\s*"message"/);
   });
 
   it("decodes the ticket from a fake camera through the whole pipeline, and reports time-to-decode", async () => {
@@ -107,7 +114,6 @@ describe("finding 1: the worker handles messages in a real browser", () => {
     await context.close();
     expect(got).toBe(true);
     expect(l.scanTokens[0]).toBe(TOKEN);
-    // eslint-disable-next-line no-console
     console.log(`time-to-decode (start() to onScan, fake camera, emulated iPhone 13, Chromium): ${l.scanAttempts[0]} ms`);
   });
 });
@@ -230,10 +236,17 @@ describe("what the module must not do", () => {
   });
 
   it("serves camera=(self) on /door/* and camera=() elsewhere from the production build", async () => {
-    const door = await fetch(`${app.url}${PATH}`);
-    const home = await fetch(`${app.url}/`);
-    expect(door.headers.get("permissions-policy")).toBe("camera=(self)");
-    expect(home.headers.get("permissions-policy")).toBe("camera=()");
+    const policy = async (p: string) => (await fetch(`${app.url}${p}`, { redirect: "manual" })).headers.get("permissions-policy");
+    // Real responses from the production server, not a re-implementation of Next's route matching.
+    for (const p of ["/door", PATH, "/door/evt-123", "/door/evt-123/check"]) {
+      expect(await policy(p), p).toBe("camera=(self)");
+    }
+    for (const p of ["/", "/tickets", "/tickets/t-1", "/events", "/doorway", "/doors", "/sign-in", "/api/events"]) {
+      expect(await policy(p), p).toBe("camera=()");
+    }
+  });
+
+  it("keeps jsqr pinned to exactly 1.4.0", () => {
     expect(readFileSync(path.join(ROOT, "package.json"), "utf8")).toContain('"jsqr": "1.4.0"');
   });
 });

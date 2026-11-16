@@ -69,8 +69,8 @@ function frameFromMatrix(matrix: boolean[][], size = 640): ImageData {
   return ctx.getImageData(0, 0, size, size);
 }
 
-/** Wraps the real worker so a test can swallow replies: the dropped-reply case that wedged the loop. */
-function wrapWorker(kind: "drop-first" | "drop-all", dropCount: number, log: SelfTestLog): WorkerLike {
+/** Wraps the real worker to count posts and terminate calls, and optionally swallow replies (the dropped-reply case). */
+function wrapWorker(kind: "pass" | "drop-first" | "drop-all", dropCount: number, log: SelfTestLog): WorkerLike {
   const real = createJsQrWorker();
   let handler: WorkerLike["onmessage"] = null;
   let swallowed = 0;
@@ -179,6 +179,7 @@ export function ScannerSelfTest() {
             }
           },
           resultDisplayMs: 1_500,
+          decodeTimeoutMs: scenario.decodeTimeoutMs,
           // The `jsqr` path is only reachable when there is no native detector, as on iOS.
           detectorScope: scenario.forceJsQr === false ? undefined : {},
           createWorker:
@@ -186,17 +187,12 @@ export function ScannerSelfTest() {
               ? () => {
                   throw new Error("worker constructor failed");
                 }
-              : scenario.worker === "drop-first" || scenario.worker === "drop-all"
-                ? () => wrapWorker(scenario.worker as "drop-first" | "drop-all", scenario.dropCount ?? 1, log)
-                : undefined,
+              : () => wrapWorker(scenario.worker === "drop-first" || scenario.worker === "drop-all" ? scenario.worker : "pass", scenario.dropCount ?? 1, log),
           createCanvas:
             scenario.canvas === "null-ctx"
               ? () => ({ width: 0, height: 0, getContext: () => null })
               : undefined,
         };
-        if (scenario.decodeTimeoutMs !== undefined) {
-          Object.assign(options, { decodeTimeoutMs: scenario.decodeTimeoutMs });
-        }
         controller = createScannerController(options);
         unsubscribe = controller.subscribe((s) => {
           log.states.push(s);

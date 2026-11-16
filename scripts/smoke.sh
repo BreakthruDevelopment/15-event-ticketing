@@ -340,4 +340,8 @@ else
   echo "skip - admin steps (SMOKE_ADMIN_EMAIL / SMOKE_ADMIN_PASSWORD not set)"
 fi
 
+# The scanner's browser harness (src/app/door/scanner-selftest) must be invisible unless SCANNER_SELFTEST=1 is set.
+req /dev/null GET /door/scanner-selftest; expect 404 "the scanner self-test page is off in a normal deploy"
+pass "scanner self-test page is not exposed"
+
 echo "SMOKE PASS"
