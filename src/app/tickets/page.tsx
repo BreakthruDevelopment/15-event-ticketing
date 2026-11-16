@@ -25,7 +25,7 @@ const columns: Column<Row>[] = [
     header: "Event",
     primary: true,
     cell: (row) => (
-      <Link href={`/tickets/${row.id}`} className="inline-flex min-h-11 min-w-0 items-center font-semibold break-words [overflow-wrap:anywhere] hover:text-accent">
+      <Link href={`/tickets/${row.id}`} className="inline-flex min-h-11 min-w-0 items-center font-semibold [overflow-wrap:anywhere] hover:text-accent">
         {row.event.title}
       </Link>
     ),
@@ -39,7 +39,7 @@ const columns: Column<Row>[] = [
     key: "holder",
     header: "Holder",
     cell: (row) => (
-      <span className="break-words [overflow-wrap:anywhere]">
+      <span className="[overflow-wrap:anywhere]">
         {row.holderName}
         {row.guestLabel ? <span className="text-muted"> · {row.guestLabel}</span> : null}
       </span>
@@ -48,7 +48,7 @@ const columns: Column<Row>[] = [
   {
     key: "type",
     header: "Type",
-    cell: (row) => <span className="break-words [overflow-wrap:anywhere]">{row.ticketTypeName}</span>,
+    cell: (row) => <span className="[overflow-wrap:anywhere]">{row.ticketTypeName}</span>,
   },
   {
     key: "status",
