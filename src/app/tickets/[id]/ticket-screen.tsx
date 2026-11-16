@@ -138,14 +138,14 @@ export function TicketScreen({ model }: { model: TicketModel }) {
         {model.doorCode && (
           <div>
             <p className="text-sm font-medium">Door code</p>
-            <p className="font-mono text-2xl tracking-wide break-words">{model.doorCode}</p>
+            <p className="font-mono text-2xl tracking-wide wrap-anywhere">{model.doorCode}</p>
             <p className="text-sm text-muted">If the camera cannot read the QR, the door can type this code.</p>
           </div>
         )}
-        <p className="break-words font-semibold">{model.holderName}</p>
-        {model.guestLabel && <p className="break-words text-sm text-muted">{model.guestLabel}</p>}
-        <p className="break-words text-muted">{model.ticketTypeName}</p>
-        <p className="break-words text-muted">{model.where}</p>
+        <p className="wrap-anywhere font-semibold">{model.holderName}</p>
+        {model.guestLabel && <p className="wrap-anywhere text-sm text-muted">{model.guestLabel}</p>}
+        <p className="wrap-anywhere text-muted">{model.ticketTypeName}</p>
+        <p className="wrap-anywhere text-muted">{model.where}</p>
       </div>
 
       <div className="no-print mt-6 space-y-3">
