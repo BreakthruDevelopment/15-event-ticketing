@@ -114,8 +114,13 @@ function linkMatches(a: ReturnType<typeof parseLink>, s: ReturnType<typeof parse
 // ---------------------------------------------------------------------------------------------------------------------
 // Number, time, price and date tokens
 
-const MONEY_SYMBOL = /\$\s?(\d[\d,]*(?:\.\d+)?)/g;
-const MONEY_WORD = /(\d[\d,]*(?:\.\d+)?)\s?(?:usd|dollars?|bucks)\b/g;
+// An amount carries its currency: "$10" and "10 dollars" are the same price, "€10" and "£10" are not ("10" alone is neither).
+const CURRENCY_SYMBOL: Record<string, string> = { "$": "usd", "€": "eur", "£": "gbp", "¥": "jpy", "₹": "inr", "₩": "krw", "₽": "rub", "₺": "try", "₪": "ils", "₫": "vnd", "₱": "php", "₦": "ngn", "฿": "thb" };
+const CURRENCY_WORD: Record<string, string> = { usd: "usd", dollar: "usd", dollars: "usd", buck: "usd", bucks: "usd", eur: "eur", euro: "eur", euros: "eur", gbp: "gbp", pound: "gbp", pounds: "gbp", jpy: "jpy", yen: "jpy", inr: "inr", rupee: "inr", rupees: "inr", cad: "cad", aud: "aud", chf: "chf", francs: "chf", mxn: "mxn", pesos: "mxn", cny: "cny", yuan: "cny", rmb: "cny" };
+const MONEY_SYMBOL = new RegExp(`([${Object.keys(CURRENCY_SYMBOL).join("")}])\\s?(\\d[\\d,]*(?:\\.\\d+)?)`, "g");
+const MONEY_SYMBOL_AFTER = new RegExp(`(\\d[\\d,]*(?:\\.\\d+)?)\\s?([${Object.keys(CURRENCY_SYMBOL).join("")}])`, "g");
+const MONEY_WORD = new RegExp(`(\\d[\\d,]*(?:\\.\\d+)?)\\s?(${Object.keys(CURRENCY_WORD).join("|")})\\b`, "g");
+const moneyToken = (cur: string, n: string) => (cur === "usd" ? `$${canonNumber(n)}` : `c:${cur}:${canonNumber(n)}`);
 const TIME_12H = /\b(\d{1,2})(?::(\d{2}))?\s?([ap])\.?m\b\.?/g;
 const TIME_24H = /\b([01]?\d|2[0-3]):([0-5]\d)\b/g;
 const NUMBER = /[a-z]*\d+(?:[.,]\d+)*[a-z]*/g;
@@ -209,12 +214,16 @@ export function numberTokens(input: string, ignore: Set<string> = new Set()): Se
   for (const w of [...MONTHS.filter((x) => x !== "may" && x !== "march"), "may!", "march!", ...WEEKDAYS]) {
     if (new RegExp(w.endsWith("!") ? w : `\\b${w}\\b`).test(s)) out.add(`w:${w.replace("!", "")}`);
   }
-  s = s.replace(MONEY_SYMBOL, (_m, n: string) => {
-    out.add(`$${canonNumber(n)}`);
+  s = s.replace(MONEY_SYMBOL, (_m, sym: string, n: string) => {
+    out.add(moneyToken(CURRENCY_SYMBOL[sym], n));
     return " ";
   });
-  s = s.replace(MONEY_WORD, (_m, n: string) => {
-    out.add(`$${canonNumber(n)}`);
+  s = s.replace(MONEY_SYMBOL_AFTER, (_m, n: string, sym: string) => {
+    out.add(moneyToken(CURRENCY_SYMBOL[sym], n));
+    return " ";
+  });
+  s = s.replace(MONEY_WORD, (_m, n: string, word: string) => {
+    out.add(moneyToken(CURRENCY_WORD[word], n));
     return " ";
   });
   s = s.replace(TIME_12H, (_m, h: string, mm: string | undefined, ap: string) => {

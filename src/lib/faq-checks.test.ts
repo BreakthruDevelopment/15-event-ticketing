@@ -24,6 +24,21 @@ describe("numberTokens", () => {
     expect([...numberTokens("$10")]).toEqual(["$10"]);
     expect([...numberTokens("1,000 seats")]).toEqual(["1000"]);
   });
+  it("keeps the currency with the amount: equal digits in different currencies are different prices", () => {
+    expect(numberTokens("€10")).not.toEqual(numberTokens("£10"));
+    expect(numberTokens("€10")).not.toEqual(numberTokens("10"));
+    expect(numberTokens("€10")).not.toEqual(numberTokens("$10"));
+    expect(numberTokens("10€")).toEqual(numberTokens("€10"));
+    expect(numberTokens("10 euros")).toEqual(numberTokens("€10"));
+    expect(numberTokens("10 pounds")).toEqual(numberTokens("£10"));
+    expect(numberTokens("$10")).toEqual(numberTokens("10 dollars"));
+    const src: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Parking", text: "Parking\nParking costs €10." }]]);
+    const chk = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, src);
+    expect(chk("Parking costs £10.").mode).toBe("quoted");
+    expect(chk("Parking costs $10.").mode).toBe("quoted");
+    expect(chk("Parking costs 10 euros.").mode).toBe("model");
+    expect(chk("Parking costs €10.").mode).toBe("model");
+  });
   it("keeps ordinals and room codes, and ignores listed citation ids only", () => {
     expect(numberTokens("3rd floor, room B12")).toEqual(new Set(["3", "b12"]));
     expect(numberTokens("see F3", new Set(["F3"]))).toEqual(new Set());
