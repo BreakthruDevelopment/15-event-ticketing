@@ -274,6 +274,13 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
   describe("accept invite: delayed retry after removal, and the door read limit", () => {
     const tokenOf = (link: string) => new URL(link).hash.slice("#t=".length);
 
+    it("an invite made with an upper-case client op id can be accepted", async () => {
+      const u = await makeUser(sql, P, "upperop", "user");
+      const e = await publish(orgA, eventInput({ title: "Upper op" }));
+      const inv = await ST.createInvite(orgA, e.id, { clientOpId: crypto.randomUUID().toUpperCase() });
+      await expect(ST.acceptInvite(u, { token: tokenOf(inv.link) })).resolves.toMatchObject({ replayed: false });
+    });
+
     it("an invite whose token the current key doesn't derive (secret rotated) is refused as unknown", async () => {
       const u = await makeUser(sql, P, "rotated", "user");
       const e = await publish(orgA, eventInput({ title: "Rotated" }));

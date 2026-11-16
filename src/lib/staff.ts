@@ -42,9 +42,9 @@ function uuidFrom(text: string): string {
 
 const digest = (token: string) => createHash("sha256").update(token).digest();
 
-/** The token for (event, op id): 16 bytes of HMAC-SHA256, base64url (22 characters). Key: `src/lib/tickets/keys.ts`. */
+/** The token for (event, op id): 16 bytes of HMAC-SHA256, base64url (22 characters). Ids are lower-cased first (Postgres returns uuids in lower case, and accept re-derives from the stored value). Key: `src/lib/tickets/keys.ts`. */
 function inviteToken(eventId: string, clientOpId: string): string {
-  return createHmac("sha256", deriveKey("staff-invite:v1")).update(`${eventId}:${clientOpId}`).digest().subarray(0, 16).toString("base64url");
+  return createHmac("sha256", deriveKey("staff-invite:v1")).update(`${eventId.toLowerCase()}:${clientOpId.toLowerCase()}`).digest().subarray(0, 16).toString("base64url");
 }
 
 const linkFor = (token: string) => `${env().APP_URL.replace(/\/$/, "")}/staff-invite#t=${token}`;
