@@ -91,11 +91,12 @@ export async function createInvite(actor: Actor | null, rawEventId: string, inpu
     const ev = await lockOwnEvent(tx, actor, rawEventId);
     const token = inviteToken(ev.id, clientOpId);
     const [existing] = await tx
-      .select({ id: I.id, expiresAt: I.expiresAt, usedAt: I.usedAt, revokedAt: I.revokedAt, expired: sql<boolean>`${I.expiresAt} <= now()` })
+      .select({ id: I.id, tokenDigest: I.tokenDigest, expiresAt: I.expiresAt, usedAt: I.usedAt, revokedAt: I.revokedAt, expired: sql<boolean>`${I.expiresAt} <= now()` })
       .from(I)
       .where(and(eq(I.eventId, ev.id), eq(I.clientOpId, clientOpId)));
     if (existing) {
-      if (existing.usedAt || existing.revokedAt || existing.expired) {
+      // A stored digest the current key no longer derives (secret rotated) can never be accepted: closed, like a used one.
+      if (existing.usedAt || existing.revokedAt || existing.expired || !existing.tokenDigest.equals(digest(token))) {
         throw new CodedConflictError("invite_closed", "That invite was already used, revoked or has expired. Create a new one.");
       }
       return { eventId: ev.id, id: existing.id, expiresAt: existing.expiresAt, token, replayed: true };

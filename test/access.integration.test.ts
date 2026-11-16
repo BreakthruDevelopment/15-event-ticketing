@@ -281,6 +281,15 @@ describe.skipIf(!url)("access rules (Postgres)", () => {
       await expect(ST.acceptInvite(u, { token: tokenOf(inv.link) })).resolves.toMatchObject({ replayed: false });
     });
 
+    it("replaying an invite create whose stored digest the current key no longer derives is 409 invite_closed", async () => {
+      const e = await publish(orgA, eventInput({ title: "Rotated replay" }));
+      const input = op();
+      const inv = await ST.createInvite(orgA, e.id, input);
+      await expect(ST.createInvite(orgA, e.id, input)).resolves.toMatchObject({ replayed: true, id: inv.id });
+      await sql`update staff_invite set token_digest = sha256('old-key-token'::bytea) where id = ${inv.id}`;
+      await expect(ST.createInvite(orgA, e.id, input)).rejects.toMatchObject({ status: 409, code: "invite_closed" });
+    });
+
     it("an invite whose token the current key doesn't derive (secret rotated) is refused as unknown", async () => {
       const u = await makeUser(sql, P, "rotated", "user");
       const e = await publish(orgA, eventInput({ title: "Rotated" }));
