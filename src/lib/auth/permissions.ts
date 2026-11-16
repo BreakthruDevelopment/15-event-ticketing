@@ -9,6 +9,10 @@
  * Deliberately NOT granted to admins: user `impersonate`, `impersonate-admins`,
  * `set-password`, `set-email`, and session `list` (it returns other users' raw session
  * tokens, IP addresses and user agents). Do not add them back.
+ *
+ * Also not granted, and disabled over HTTP: user `create`, `set-role`, `update` and `delete`. Roles change only
+ * through `POST /api/admin/roles` (src/lib/auth/roles.ts), which hides or unhides the organiser's events in the same
+ * transaction; Better Auth's own set-role would skip that. Account deletion is out of scope (user foreign keys restrict).
  */
 import { createAccessControl } from "better-auth/plugins/access";
 import { defaultStatements } from "better-auth/plugins/admin/access";
@@ -17,9 +21,11 @@ export const ac = createAccessControl(defaultStatements);
 
 export const roles = {
   admin: ac.newRole({
-    user: ["create", "list", "set-role", "ban", "delete", "get", "update"],
+    user: ["list", "ban", "get"],
     session: ["revoke", "delete"],
   }),
+  // `organizer` holds no auth-admin permissions; what an organiser may do is decided in src/lib/access.ts.
+  organizer: ac.newRole({ user: [], session: [] }),
   user: ac.newRole({ user: [], session: [] }),
 };
 
@@ -29,4 +35,9 @@ export const DISABLED_AUTH_PATHS = [
   "/admin/stop-impersonating",
   "/admin/set-user-password",
   "/admin/list-user-sessions",
+  // Role changes and account writes go through POST /api/admin/roles only (see the header comment).
+  "/admin/set-role",
+  "/admin/create-user",
+  "/admin/update-user",
+  "/admin/remove-user",
 ];

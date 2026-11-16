@@ -1,7 +1,8 @@
 /**
  * Nobody can sign up as a demo identity or turn an account into one, on any Better Auth write path
- * (sign-up, /update-user, /admin/create-user, /admin/update-user), while code that writes rows
- * directly with Drizzle (the demo loader) is unaffected.
+ * (sign-up and /update-user; /admin/create-user and /admin/update-user are disabled in this app, see
+ * permissions.ts, and the hooks would still refuse them), while code that writes rows directly with Drizzle
+ * (the demo loader) is unaffected.
  */
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -97,24 +98,24 @@ describe.skipIf(!url)("demo identity hooks (Better Auth + Postgres)", () => {
     expect((await call("/update-user", { name: "Plain Two" }, userCookie)).status).toBe(200);
   });
 
-  it("refuses /admin/create-user with a demo email or marker image, and allows an ordinary user", async () => {
+  it("answers 403/404 for /admin/create-user, even with a demo email or marker image, and creates no user", async () => {
+    // The route is disabled in this app (roles and accounts change only through POST /api/admin/roles).
     const make = (email: string, extra: object = {}) =>
       call("/admin/create-user", { name: "Made", email, password: PASSWORD, role: "user", ...extra }, adminCookie);
-    expect((await make("di-c1@demo.breakthru.test")).status).toBe(400);
-    expect((await make("di-c2@test.local", { data: { image: MARKER } })).status).toBe(400);
-    expect(await count("di-c1@demo.breakthru.test")).toBe(0);
-    expect(await count("di-c2@test.local")).toBe(0);
-    expect((await make("di-c3@test.local")).status).toBe(200);
+    for (const res of [await make("di-c1@demo.breakthru.test"), await make("di-c2@test.local", { data: { image: MARKER } }), await make("di-c3@test.local")]) {
+      expect([403, 404]).toContain(res.status);
+    }
+    for (const email of ["di-c1@demo.breakthru.test", "di-c2@test.local", "di-c3@test.local"]) expect(await count(email)).toBe(0);
   });
 
-  it("refuses /admin/update-user setting a demo email or marker image", async () => {
+  it("answers 403/404 for /admin/update-user setting a demo email or marker image, and changes nothing", async () => {
     const upd = (data: object) => call("/admin/update-user", { userId: targetId, data }, adminCookie);
-    // Admins lack the `set-email` permission (permissions.ts), so an email change is refused even earlier (403).
-    expect([400, 403]).toContain((await upd({ email: "di-t@demo.breakthru.test" })).status);
-    expect((await upd({ image: MARKER })).status).toBe(400);
+    for (const data of [{ email: "di-t@demo.breakthru.test" }, { image: MARKER }, { name: "Target Two" }]) {
+      expect([403, 404]).toContain((await upd(data)).status);
+    }
     expect(await imageOf("di-target@test.local")).not.toBe(MARKER);
     expect(await count("di-t@demo.breakthru.test")).toBe(0);
-    expect((await upd({ name: "Target Two" })).status).toBe(200);
+    expect((await sql`select name from "user" where email = 'di-target@test.local'`)[0].name).toBe("Target");
   });
 
   it("does not affect direct Drizzle-style writes, which is how the demo loader works", async () => {

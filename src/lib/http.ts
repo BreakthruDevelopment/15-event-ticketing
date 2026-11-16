@@ -1,14 +1,21 @@
 import { ZodError } from "zod";
 import { AiError } from "@/lib/ai/types";
 import { ForbiddenError, UnauthorizedError } from "@/lib/auth/rbac";
-import { BadRequestError, HttpError, PayloadTooLargeError } from "@/lib/errors";
+import { BadRequestError, CodedConflictError, HttpError, PayloadTooLargeError, VersionConflictError } from "@/lib/errors";
+import { dbErrorCode } from "@/lib/db-errors";
 import { log } from "@/lib/log";
 import { safeErrorFields } from "@/lib/safe-error";
 
-export type ErrorInfo = { status: number; body: { error: string; issues?: unknown } };
+export type ErrorInfo = { status: number; body: { error: string; issues?: unknown; current?: unknown; code?: string } };
 
 /** Map known errors to a status and a client-safe body; never leak stack traces or internals. */
 export function errorInfo(err: unknown): ErrorInfo {
+  if (err instanceof VersionConflictError) {
+    return { status: 409, body: { error: err.message, code: "version_conflict", current: err.current } };
+  }
+  if (err instanceof CodedConflictError) {
+    return { status: 409, body: { error: err.message, code: err.code } };
+  }
   if (err instanceof UnauthorizedError || err instanceof ForbiddenError || err instanceof HttpError) {
     return { status: err.status, body: { error: err.message } };
   }
@@ -20,6 +27,10 @@ export function errorInfo(err: unknown): ErrorInfo {
         issues: err.issues.map((i) => ({ path: i.path, message: i.message })),
       },
     };
+  }
+  // The database picked this request to lose a lock race (deadlock or serialization failure): nothing was changed.
+  if (dbErrorCode(err) === "40P01" || dbErrorCode(err) === "40001") {
+    return { status: 409, body: { error: "That was busy. Try again.", code: "retry" } };
   }
   if (err instanceof AiError) {
     const status = err.kind === "input_rejected" ? 400 : err.kind === "quota" ? 429 : 502;
@@ -75,3 +86,6 @@ export function parseJsonBody(bytes: Buffer): unknown {
 export async function readJson(request: Request, limit: number = JSON_BODY_LIMIT): Promise<unknown> {
   return parseJsonBody(await readBodyCapped(request, limit));
 }
+
+/** Headers for responses that depend on who is asking (drafts, attendee lists, invites): never stored by a shared cache. */
+export const NO_STORE = { "Cache-Control": "private, no-store" } as const;

@@ -4,7 +4,15 @@
  * handler calls these before touching data.
  */
 
-export const ROLES = ["user", "admin"] as const;
+/**
+ * `user` is an attendee (every sign-up), `organizer` runs events (granted only by an admin, through
+ * `POST /api/admin/roles`), `admin` sees counts and moderates. A user holds exactly one role and admin is NOT a
+ * superset of `organizer`: an admin can't create or edit events. Door staff is not a role: it is a row in
+ * `event_staff` per event (src/lib/access.ts).
+ */
+export const ROLES = ["user", "organizer", "admin"] as const;
+/** The roles an admin may set through `POST /api/admin/roles`. `admin` is made out of band. */
+export const GRANTABLE_ROLES = ["user", "organizer"] as const;
 export type Role = (typeof ROLES)[number];
 
 export type Actor = { id: string; role: Role };
@@ -18,11 +26,12 @@ export function isRole(value: unknown): value is Role {
   return typeof value === "string" && (ROLES as readonly string[]).includes(value);
 }
 
-/** Better Auth's admin plugin can store comma-separated roles; take the strongest. */
+/** Better Auth's admin plugin can store comma-separated roles; take the strongest (admin > organizer > user). */
 export function toRole(value: string | null | undefined): Role {
   if (!value) return "user";
   const parts = value.split(",").map((p) => p.trim());
-  return parts.includes("admin") ? "admin" : "user";
+  if (parts.includes("admin")) return "admin";
+  return parts.includes("organizer") ? "organizer" : "user";
 }
 
 export function can(actor: Actor, action: Action, resource?: Owned): boolean {

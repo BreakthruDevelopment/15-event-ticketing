@@ -1,0 +1,2 @@
+ALTER TABLE "rate_event" DROP CONSTRAINT "rate_event_kind_chk";--> statement-breakpoint
+ALTER TABLE "rate_event" ADD CONSTRAINT "rate_event_kind_chk" CHECK ("rate_event"."kind" in ('api_write', 'api_read', 'ai', 'upload', 'register', 'checkin', 'checkin_miss', 'door_read'));

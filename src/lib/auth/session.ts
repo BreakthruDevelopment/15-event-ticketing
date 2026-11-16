@@ -27,10 +27,10 @@ export async function requireUserOrRedirect(): Promise<CurrentUser> {
   return user;
 }
 
-/** For pages: signed-in users without the role go to the dashboard. */
+/** For pages: signed-in users without the role go to the dashboard. `user` means any signed-in user. */
 export async function requireRoleOrRedirect(role: Role): Promise<CurrentUser> {
   const user = await requireUserOrRedirect();
-  if (role === "admin" && user.role !== "admin") redirect("/dashboard");
+  if (role !== "user" && user.role !== role) redirect("/dashboard");
   return user;
 }
 
@@ -41,8 +41,9 @@ export async function requireUser(): Promise<CurrentUser> {
   return user;
 }
 
+/** Exact match for `organizer` and `admin` (admin is not a superset of organizer); `user` means any signed-in user. */
 export async function requireRole(role: Role): Promise<CurrentUser> {
   const user = await requireUser();
-  if (role === "admin" && user.role !== "admin") throw new ForbiddenError();
+  if (role !== "user" && user.role !== role) throw new ForbiddenError();
   return user;
 }

@@ -39,3 +39,9 @@ export function text(max: number, opts: { min?: number; minMessage?: string } = 
     .max(max)
     .refine(hasNoNul, NUL_MESSAGE);
 }
+
+/** An identifier that isn't a uuid (Better Auth user ids, slugs, tokens in a path): non-empty, at most 200 characters, no NUL byte. */
+export const idText = z.string().min(1).max(200).refine(hasNoNul, NUL_MESSAGE);
+
+/** A uuid in a path or body. A NUL byte or any other malformed value is a 400, never a database error. */
+export const uuidText = idText.pipe(z.string().uuid());
