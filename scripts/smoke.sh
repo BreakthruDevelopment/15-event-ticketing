@@ -60,11 +60,11 @@ for path in / /sign-in; do
 done
 pass "pages render inside the shared shell"
 
-for path in /dashboard /admin; do
+for path in /dashboard /admin /tickets /staff-invite; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL$path")
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
-pass "signed-out dashboard and admin redirect"
+pass "signed-out dashboard, admin, tickets and staff invite redirect"
 
 # Better Auth allows 3 sign-in/sign-up requests per 10 s per IP. Back-to-back runs (smoke right after seeding, or two
 # users in a row) can hit it. On a 429, wait out the window and retry once.
@@ -260,6 +260,36 @@ req "$JAR_A" GET /api/tickets; expect 200 "A's ticket list"
 [ "$(echo "$BODY" | jq '.tickets | length')" = "1" ] || fail "A should see one ticket: $BODY"
 echo "$BODY" | grep -q 'ET1:' && fail "the ticket list must not carry a QR text"
 pass "tickets are private to their holder: QR text and door code only on the holder's own ticket, no-store"
+
+# Ticket pages (spec 15.8). The QR text stays out of the HTML; the door code, download and print are on the holder's page.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/tickets/$TICKET_A")
+[ "$code" = "307" ] || fail "signed-out ticket page should redirect (307), got $code"
+list_page=$(curl -fsS -b "$JAR_A" "$BASE_URL/tickets") || fail "A's ticket list page did not render"
+echo "$list_page" | grep -q "Smoke meetup $RUN_ID" || fail "the ticket list page is missing the event title"
+echo "$list_page" | grep -F -q "$QR_A" && fail "the ticket list page must not contain the QR text"
+hdrs=$(curl -s -D - -o "$RESP" -b "$JAR_A" "$BASE_URL/tickets/$TICKET_A")
+echo "$hdrs" | grep -qi '^cache-control:.*no-store' || fail "the ticket page must be no-store: $hdrs"
+echo "$hdrs" | grep -qi '^referrer-policy: no-referrer' || fail "the ticket page must send no-referrer: $hdrs"
+page=$(cat "$RESP")
+echo "$page" | grep -q 'Download PNG' || fail "the ticket page is missing the PNG download"
+echo "$page" | grep -q 'Print' || fail "the ticket page is missing print"
+echo "$page" | grep -q 'Door code' || fail "the ticket page is missing the door code label"
+echo "$page" | grep -F -q "$CODE_A" || fail "the ticket page is missing the holder's door code"
+echo "$page" | grep -F -q "$QR_A" && fail "the ticket page must not contain the QR text"
+echo "$page" | grep -q 'ticket-sheet' || fail "the ticket page is missing the printable sheet"
+found_print=0
+if echo "$page" | grep -q 'page-break-after:[[:space:]]*always'; then found_print=1; fi
+for css in $(echo "$page" | grep -oE '/_next/static/[^" ]+\.css'); do
+  if curl -fsS "$BASE_URL$css" | grep -q 'page-break-after:[[:space:]]*always'; then found_print=1; fi
+done
+[ "$found_print" = "1" ] || fail "the print stylesheet must put one ticket on a page"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_B" "$BASE_URL/tickets/$TICKET_A")
+[ "$code" = "404" ] || fail "B opening A's ticket page should be 404, got $code"
+invite=$(curl -fsS -b "$JAR_C" "$BASE_URL/staff-invite") || fail "staff invite page did not render"
+echo "$invite" | grep -q 'Staff invite' || fail "staff invite page is missing its heading"
+echo "$invite" | grep -q 'Open the invite link' || fail "staff invite page must explain that the code stays in the link"
+echo "$invite" | grep -F -q "$TOKEN" && fail "the staff invite page must not render the invite token"
+pass "ticket pages and the staff invite page"
 
 REISSUE_OP="$(uuid)"
 req "$JAR_A" POST "/api/tickets/$TICKET_A/reissue" "{\"clientOpId\":\"$REISSUE_OP\"}"; expect 200 "A reissues"
