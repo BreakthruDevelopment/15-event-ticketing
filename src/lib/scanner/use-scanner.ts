@@ -26,8 +26,10 @@ import {
 import {
   MANUAL_INPUT_ATTRS,
   type ManualEntryResult,
+  BUSY_MESSAGE,
   NOT_A_TICKET_MESSAGE,
   parseManualEntry,
+  truncateRaw,
 } from "./manual";
 
 /**
@@ -196,6 +198,11 @@ export function createScannerController(
   let audioCtx: AudioContext | null = null;
   let activeVideo: HTMLVideoElement | VideoSourceLike | null = null;
   let startGeneration = 0;
+  /**
+   * The session the controller currently owns. A session's `onStop` only touches controller state when it is this
+   * one, so a superseded session (an overlapping `start()`) can only ever stop its own stream.
+   */
+  let ownerSession: CameraSession | null = null;
   /** After a failed check-in the camera loop pauses until this time, so a dead network is not hammered at 8 fps. */
   let retryHoldUntil = 0;
 
@@ -303,11 +310,14 @@ export function createScannerController(
     });
 
     let session: CameraSession;
+    let mine: CameraSession | null = null;
     try {
       session = await startCamera({
         ...options.cameraOptions,
         video: (activeVideo as HTMLVideoElement | null) ?? null,
         onStop: (reason) => {
+          // Before `startCamera` returns we do not hold the session yet: fall back to the start generation.
+          if (mine === null ? gen !== startGeneration : ownerSession !== mine) return;
           if (frameLoop) {
             frameLoop.stop();
             frameLoop = null;
@@ -336,8 +346,14 @@ export function createScannerController(
       return false;
     }
 
+    mine = session;
     if (gen !== startGeneration) {
       session.stop("manual");
+      return false;
+    }
+    ownerSession = session;
+    if (session.isStopped()) {
+      // Already stopped (the tab was hidden during the permission prompt); `onStop` has set the idle state.
       return false;
     }
     cameraSession = session;
@@ -454,9 +470,16 @@ export function createScannerController(
       showBanner("warning", msg, resultDisplayMs);
       triggerDeviceFeedback("warning", audioCtx);
       if (parsed.reason === "not_a_ticket") {
-        options.onInvalidQr?.(input, msg);
+        options.onInvalidQr?.(truncateRaw(input), msg);
       }
       return parsed;
+    }
+    // Check busy BEFORE the dedupe records the token: a refused entry must not be remembered as scanned, and the
+    // staffer is told rather than shown nothing.
+    if (state.busy) {
+      showBanner("warning", BUSY_MESSAGE, resultDisplayMs);
+      triggerDeviceFeedback("warning", audioCtx);
+      return { kind: "invalid", reason: "busy", message: BUSY_MESSAGE };
     }
     if (parsed.kind === "qr") {
       if (!dedupe.shouldAccept(parsed.qr, now())) {
@@ -531,6 +554,7 @@ export function useScanner(options: ScannerControllerOptions = {}): UseScannerRe
       ...optionsRef.current,
       onScan: (qr) => optionsRef.current.onScan?.(qr),
       onDoorCode: (code) => optionsRef.current.onDoorCode?.(code),
+      onScanError: (err) => optionsRef.current.onScanError?.(err),
       onEntry: (entry) => optionsRef.current.onEntry?.(entry),
       onInvalidQr: (raw, msg) => optionsRef.current.onInvalidQr?.(raw, msg),
       onDuplicate: (qr) => optionsRef.current.onDuplicate?.(qr),

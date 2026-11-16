@@ -9,6 +9,7 @@ export const TICKET_QR_RE = /^ET1:[0-9A-HJKMNP-TV-Z]{56}$/;
 export const DOOR_CODE_RE = /^[0-9A-HJKMNP-TV-Z]{10}$/;
 
 export const NOT_A_TICKET_MESSAGE = "Not a ticket";
+export const BUSY_MESSAGE = "Still checking the last ticket. Try again in a moment.";
 export const INVALID_DOOR_CODE_MESSAGE = "Enter a 10-character door code (XXXXX-XXXXX)";
 
 /** Recommended HTML attributes for the manual door-code / wedge-scanner input field. */
@@ -21,11 +22,23 @@ export const MANUAL_INPUT_ATTRS = {
 export type ManualEntryResult =
   | { kind: "qr"; qr: string }
   | { kind: "code"; code: string; formatted: string }
-  | { kind: "invalid"; reason: "empty" | "not_a_ticket" | "invalid_code"; message: string };
+  | { kind: "invalid"; reason: "empty" | "not_a_ticket" | "invalid_code" | "busy"; message: string };
 
 export type ScannedQrValidation =
   | { ok: true; qr: string }
   | { ok: false; reason: "empty" | "not_a_ticket"; message: string };
+
+/** The longest raw scan text a callback is handed; anything past this is cut. */
+export const MAX_REPORTED_RAW_CHARS = 64;
+
+/**
+ * Bounds a raw scanned or typed string before it leaves this module (an `onInvalidQr` consumer may log it): control
+ * characters become `?` so it cannot forge a log line, and the length is capped.
+ */
+export function truncateRaw(raw: string): string {
+  const clean = raw.replace(/[\u0000-\u001f\u007f]/g, "?");
+  return clean.length > MAX_REPORTED_RAW_CHARS ? `${clean.slice(0, MAX_REPORTED_RAW_CHARS)}\u2026` : clean;
+}
 
 /** Strict check for a 60-character `ET1:` Crockford base32 ticket QR token. */
 export function isTicketQrText(text: unknown): text is string {

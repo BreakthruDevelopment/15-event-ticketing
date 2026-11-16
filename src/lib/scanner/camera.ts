@@ -273,6 +273,12 @@ export async function startCamera(options: StartCameraOptions = {}): Promise<Cam
     win.addEventListener("pagehide", onPageHide);
   }
 
+  // The tab may have been hidden while the permission prompt was open: `visibilitychange` already fired, so the
+  // listener above would never see it. Check once now that the stream exists.
+  if (doc && doc.visibilityState === "hidden") {
+    stop("visibilitychange");
+  }
+
   function stop(reason: CameraStopReason = "manual"): void {
     if (stopped) return;
     stopped = true;

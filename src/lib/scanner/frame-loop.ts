@@ -6,7 +6,7 @@ import {
   type DecoderKind,
 } from "./detect";
 import type { JsQrWorkerResponse } from "./jsqr-core";
-import { validateScannedQr } from "./manual";
+import { truncateRaw, validateScannedQr } from "./manual";
 
 /**
  * Main-thread frame loop for `/door/[eventId]`:
@@ -161,7 +161,7 @@ export function processDecodedRawText(
 ): "accepted" | "invalid" | "duplicate" {
   const check = validateScannedQr(rawValue);
   if (!check.ok) {
-    handlers.onInvalidQr?.(rawValue, check.message);
+    handlers.onInvalidQr?.(truncateRaw(rawValue), check.message);
     return "invalid";
   }
   const timestamp = handlers.now();

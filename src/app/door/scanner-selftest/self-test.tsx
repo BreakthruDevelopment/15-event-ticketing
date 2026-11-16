@@ -22,6 +22,8 @@ export interface SelfTestScenario {
   decodeTimeoutMs?: number;
   /** Pretend there is no native BarcodeDetector (iOS Safari), which is the only way to reach the worker. */
   forceJsQr?: boolean;
+  /** Delay, in ms, added to each successive `getUserMedia` call: `[600, 0]` makes the second of two starts get its camera first. */
+  gumDelays?: number[];
 }
 
 export interface SelfTestLog {
@@ -42,6 +44,8 @@ declare global {
       log: SelfTestLog;
       workerRoundTrip(matrix: boolean[][], timeoutMs: number): Promise<{ ok: boolean; text: string | null; ms: number; errors: number }>;
       start(scenario: SelfTestScenario): Promise<{ started: boolean; ms: number }>;
+      /** Two overlapping `start()` calls (a double-tap on "Start scanning"). */
+      startTwice(scenario: SelfTestScenario): Promise<{ first: boolean; second: boolean }>;
       submitManual(input: string): Promise<unknown>;
       controller(): ScannerController | null;
       state(): ScannerState | null;
@@ -128,9 +132,13 @@ export function ScannerSelfTest() {
     // Record every stream the page asks for, so a test can check each track ended.
     const md = navigator.mediaDevices;
     const realGetUserMedia = md?.getUserMedia?.bind(md);
+    let gumCalls = 0;
+    const gumDelays: { current: number[] } = { current: [] };
     if (md && realGetUserMedia) {
       md.getUserMedia = async (constraints) => {
+        const delay = gumDelays.current[gumCalls++] ?? 0;
         const stream = await realGetUserMedia(constraints);
+        if (delay > 0) await new Promise((r) => setTimeout(r, delay));
         streams.push(stream);
         return stream;
       };
@@ -164,7 +172,29 @@ export function ScannerSelfTest() {
         worker.terminate?.();
         return { ...result, ms: Math.round(performance.now() - t0), errors };
       },
+      async startTwice(scenario) {
+        gumCalls = 0;
+        gumDelays.current = scenario.gumDelays ?? [];
+        build(scenario);
+        log.startedAt = performance.now();
+        const first = controller!.start(videoRef.current);
+        const second = controller!.start(videoRef.current);
+        return { first: await first, second: await second };
+      },
       async start(scenario) {
+        gumCalls = 0;
+        gumDelays.current = [];
+        build(scenario);
+        log.startedAt = performance.now();
+        const started = await controller!.start(videoRef.current);
+        return { started, ms: Math.round(performance.now() - log.startedAt) };
+      },
+      submitManual: (input) => controller!.submitManual(input),
+      controller: () => controller,
+      state: () => controller?.getState() ?? null,
+    };
+
+    function build(scenario: SelfTestScenario) {
         controller?.stop("manual");
         unsubscribe?.();
         let thrown = false;
@@ -198,14 +228,7 @@ export function ScannerSelfTest() {
           log.states.push(s);
           setState(s);
         });
-        log.startedAt = performance.now();
-        const started = await controller.start(videoRef.current);
-        return { started, ms: Math.round(performance.now() - log.startedAt) };
-      },
-      submitManual: (input) => controller!.submitManual(input),
-      controller: () => controller,
-      state: () => controller?.getState() ?? null,
-    };
+    }
 
     return () => {
       window.removeEventListener("unhandledrejection", onRejection);

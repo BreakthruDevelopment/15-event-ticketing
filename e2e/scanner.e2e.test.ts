@@ -206,6 +206,23 @@ describe("finding 5: a failing check-in request is not silent, and the retry is 
   });
 });
 
+describe("overlapping start() calls (review 5923731525, B1)", () => {
+  it("a double-tap whose second camera arrives first leaves no track live after stop()", async () => {
+    const { page, context } = await iphone();
+    // The first request's camera is held back 600 ms, so the second request's camera arrives first.
+    const r = await page.evaluate((s) => window.__selfTest!.startTwice(s), { gumDelays: [600, 0] });
+    const mid = await status(page);
+    await page.evaluate(() => window.__selfTest!.controller()!.stop("manual"));
+    const live = await tracksEnded(page);
+    await context.close();
+    expect(r.second).toBe(true);
+    expect(r.first).toBe(false);
+    expect(mid).toBe("scanning");
+    expect(live.streams).toBe(2);
+    expect(live.live).toBe(0);
+  });
+});
+
 describe("375px wide", () => {
   it("renders the error states without horizontal overflow", async () => {
     const { page, context } = await iphone();

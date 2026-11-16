@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startCamera } from "./camera";
-import { startFrameLoop, type WorkerLike } from "./frame-loop";
+import { createScanDedupe } from "./dedupe";
+import { processDecodedRawText, startFrameLoop, type WorkerLike } from "./frame-loop";
 import { createScannerController, type ScannerControllerOptions } from "./use-scanner";
 
 /**
@@ -188,5 +189,102 @@ describe("controller: a failing check-in is not silent", () => {
     const { ctrl } = controllerWith({ onScan: async () => {} });
     await ctrl.submitManual(TOKEN);
     expect(JSON.stringify(ctrl.getState())).not.toContain("ET1:");
+  });
+});
+
+// Review 5923731525.
+describe("controller: overlapping start() calls (B1)", () => {
+  it("a stale session's stop cannot tear down the live session or orphan its stream", async () => {
+    const trackA = fakeTrack();
+    const trackB = fakeTrack();
+    let resolveA!: (s: MediaStream) => void;
+    let resolveB!: (s: MediaStream) => void;
+    const getUserMedia = vi
+      .fn()
+      .mockReturnValueOnce(new Promise<MediaStream>((r) => (resolveA = r)))
+      .mockReturnValueOnce(new Promise<MediaStream>((r) => (resolveB = r)));
+    const ctrl = createScannerController({
+      detectorScope: {},
+      intervalMs: 60_000,
+      createCanvas: okCanvas,
+      createWorker: () => ({ onmessage: null, postMessage: () => {}, terminate: () => {} }),
+      cameraOptions: { mediaDevices: { getUserMedia }, document: null, window: null },
+    });
+    const video = { readyState: 4 } as HTMLVideoElement;
+    const first = ctrl.start(video); // a double-tap on "Start scanning"
+    const second = ctrl.start(video);
+    resolveB(fakeStream(trackB)); // the second request's camera arrives first
+    const secondStarted = await second;
+    resolveA(fakeStream(trackA));
+    const firstStarted = await first;
+    expect(secondStarted).toBe(true);
+    expect(firstStarted).toBe(false);
+    expect(trackA.stop).toHaveBeenCalled(); // the superseded stream is released
+    expect(ctrl.getState().status).toBe("scanning"); // and did not take the live session down with it
+    expect(trackB.stop).not.toHaveBeenCalled();
+    ctrl.stop("manual");
+    expect(trackB.stop).toHaveBeenCalled(); // an explicit stop reaches the live camera
+    expect(ctrl.getState().status).toBe("idle");
+  });
+});
+
+describe("controller: an entry submitted while busy (B2)", () => {
+  it("is refused visibly, not consumed, and the retry goes through", async () => {
+    const calls: string[] = [];
+    let release!: () => void;
+    const T2 = `ET1:${"Z".repeat(56)}`;
+    const { ctrl } = controllerWith({
+      onScan: (qr) => {
+        calls.push(qr);
+        return calls.length === 1 ? new Promise<void>((r) => (release = r)) : undefined;
+      },
+    });
+    const first = ctrl.submitManual(TOKEN); // in flight
+    const second = await ctrl.submitManual(T2); // staffer taps again meanwhile
+    expect(second).toMatchObject({ kind: "invalid", reason: "busy" }); // not reported as accepted
+    expect(ctrl.getState().banner).toMatchObject({ tone: "warning" });
+    expect(calls).toEqual([TOKEN]);
+    release();
+    await first;
+    const retry = await ctrl.submitManual(T2);
+    expect(retry.kind).toBe("qr");
+    expect(calls).toEqual([TOKEN, T2]); // not swallowed as a 3 s duplicate
+  });
+});
+
+describe("camera hidden while the permission prompt was open", () => {
+  it("stops the stream as soon as it is acquired", async () => {
+    const track = fakeTrack();
+    const onStop = vi.fn();
+    const doc = { visibilityState: "hidden" as DocumentVisibilityState, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    const session = await startCamera({
+      mediaDevices: { getUserMedia: async () => fakeStream(track) },
+      document: doc as unknown as Document,
+      window: null,
+      onStop,
+    });
+    expect(session.isStopped()).toBe(true);
+    expect(track.stop).toHaveBeenCalledTimes(1);
+    expect(onStop).toHaveBeenCalledWith("visibilitychange");
+  });
+});
+
+describe("onInvalidQr never hands out an unbounded raw string", () => {
+  it("truncates and strips control characters", async () => {
+    const seen: string[] = [];
+    const { ctrl } = controllerWith({ onInvalidQr: (raw) => void seen.push(raw) });
+    await ctrl.submitManual(`http://x\nFORGED LOG LINE: ${"x".repeat(5_000)}`);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].length).toBeLessThanOrEqual(65);
+    expect(seen[0]).not.toMatch(/[\u0000-\u001f]/);
+    const camera: string[] = [];
+    processDecodedRawText(`WIFI:S:${"y".repeat(5_000)}`, {
+      dedupe: createScanDedupe(),
+      now: () => 0,
+      onTicketQr: () => {},
+      onInvalidQr: (raw) => void camera.push(raw),
+    });
+    expect(camera).toHaveLength(1);
+    expect(camera[0].length).toBeLessThanOrEqual(65);
   });
 });
