@@ -754,7 +754,7 @@ describe.skipIf(!url)("FAQ entries and the FAQ bot (Postgres)", () => {
       expect(what).toMatchObject({ status: "answered", mode: "lookup", citations: [{ id: "F1" }] });
       expect(what.text).toBe("From the organiser's FAQ:\n\nWhat kind of meetup is this?\nA product meetup.");
       // a lookup answer stores answer null
-      expect((await sql`select answer, mode from faq_ask where event_id = ${ev.id} and q_hash = ${(await askRows(ev.id)).at(-1)!.q_hash}`)[0]).toMatchObject({ answer: null, mode: "lookup" });
+      expect((await sql`select answer, mode from faq_ask where event_id = ${ev.id} and question = 'What kind of meetup?'`)[0]).toMatchObject({ answer: null, mode: "lookup" });
     });
 
     it("another event never gets the recorded parking answer, even for a parking question", async () => {
