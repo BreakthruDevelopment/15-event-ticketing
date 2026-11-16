@@ -228,3 +228,44 @@ describe("links keep the case of path, query and fragment", () => {
     caught("Buy at https://tickets.example.com/EventPass/extra.");
   });
 });
+
+describe("a link may not be redirected with a backslash, or cut short", () => {
+  const mk = (text: string): SourceMap => new Map([["F1", { id: "F1", kind: "faq", label: "Links", text: `Links\n${text}` }]]);
+  const run = (source: string, answer: string) => checkFaqAnswer({ status: "answered", answer, citations: ["F1"] }, mk(source));
+  const caught = (source: string, answer: string) => expect(run(source, answer), answer).toMatchObject({ mode: "quoted", answer: null, flags: expect.arrayContaining(["unsupported_link"]) });
+  const fine = (source: string, answer: string) => expect(run(source, answer).mode, answer).toBe("model");
+
+  it("a backslash after the host is refused (browsers read it as a path separator)", () => {
+    caught("Buy at https://tickets.example.com/EventPass today.", "Buy at https://tickets.example.com\\@evil.test/EventPass today.");
+    caught("Buy at tickets.example.com today.", "Buy at https://tickets.example.com\\..\\admin today.");
+    caught("Buy at https://tickets.example.com/EventPass today.", "Buy at https://tickets.example.com\\EventPass today.");
+  });
+  it("a scheme-less link with a backslash is refused too", () => {
+    caught("Buy at tickets.example.com today.", "Buy at tickets.example.com\\refund-form today.");
+    caught("Buy at tickets.example.com/EventPass today.", "Buy at www.tickets.example.com\\EventPass today.");
+  });
+  it("credentials in front of the host are refused", () => {
+    // the finder reads "evil.test@tickets.example.com" as an email, so it is refused as one; either way it is quoted away
+    for (const answer of ["Buy at https://evil.test@tickets.example.com/EventPass today.", "Buy at https://evil@tickets.example.com/EventPass today."]) {
+      expect(run("Buy at https://tickets.example.com/EventPass today.", answer), answer).toMatchObject({ mode: "quoted", answer: null });
+    }
+    expect(canonLink("https://evil@tickets.example.com/EventPass").key).not.toBe(canonLink("https://tickets.example.com/EventPass").key);
+  });
+  it("canonLink reads a backslash as the slash a browser reads", () => {
+    expect(canonLink("https://tickets.example.com\\admin").key).toBe(canonLink("https://tickets.example.com/admin").key);
+  });
+  it("a prefix of a longer link never stands in for it, whatever character the cut lands on", () => {
+    for (const sep of ["~", ":", "=", "&", "+"]) {
+      const full = `https://tickets.example.com/Event${sep}Pass`;
+      caught(`Buy at ${full} today.`, "Buy at https://tickets.example.com/Event today.");
+      caught(`Buy at ${full} today.`, "Buy at tickets.example.com/Event today.");
+      fine(`Buy at ${full} today.`, `Buy at ${full} today.`);
+    }
+  });
+  it("a dropped query or fragment is refused, a kept one is fine", () => {
+    caught("Buy at https://tickets.example.com/Event?tier=VIP today.", "Buy at https://tickets.example.com/Event today.");
+    caught("Buy at https://tickets.example.com/Event#Seats today.", "Buy at https://tickets.example.com/Event today.");
+    caught("Buy at tickets.example.com/Event?tier=VIP today.", "Buy at tickets.example.com/Event today.");
+    fine("Buy at https://tickets.example.com/Event?tier=VIP today.", "Buy at https://tickets.example.com/Event?tier=VIP today.");
+  });
+});

@@ -70,7 +70,9 @@ export function findPhones(input: string): string[] {
   return (input.match(PHONE) ?? []).map((m) => m.replace(/\D/g, "")).filter((d) => d.length >= 7);
 }
 
-const isTokenChar = (c: string | undefined) => !!c && /[a-z0-9_\-/%@]/i.test(c);
+// Anything that can continue a link: a prefix that ends before one of these is not the whole link ("/Event" is not "/Event~Pass",
+// nor "/Event?tier=VIP").
+const isTokenChar = (c: string | undefined) => !!c && /[a-z0-9_\-/%@~:=&+?#]/i.test(c);
 
 /** `needle` occurs in `haystack` as a whole link or email: not as the start or middle of a longer one. Case-sensitive. */
 function containsWhole(haystack: string, needle: string): boolean {
@@ -94,13 +96,16 @@ function containsWhole(haystack: string, needle: string): boolean {
  * slash on the path is ignored, as before. The scheme is kept apart: an answer may omit it, but may not change it (see
  * `linkMatches`).
  */
-export function canonLink(link: string): { scheme: "http" | "https" | ""; key: string } {
+export function canonLink(rawLink: string): { scheme: "http" | "https" | ""; key: string } {
+  // Browsers read "\" as "/" in http(s) links (WHATWG URL), so "host\\@evil/x" goes to host/@evil/x, not to host.
+  const link = rawLink.replace(/\\/g, "/");
   const m = /^(https?):\/\//i.exec(link);
   const scheme = (m ? m[1].toLowerCase() : "") as "http" | "https" | "";
   const rest = link.slice(m ? m[0].length : 0);
   const cut = rest.search(/[/?#]/);
   let host = cut < 0 ? rest : rest.slice(0, cut);
   let tail = cut < 0 ? "" : rest.slice(cut);
+  if (host.includes("@")) return { scheme, key: `userinfo:${host}${tail}` }; // "user@host" hides the real host: never equals a source link
   try {
     host = new URL(`http://${host}`).host; // lower-cased, punycode, default port of http dropped
   } catch {
@@ -277,7 +282,9 @@ export function unsupportedParts(answer: string, sourceText: string, citedIds: s
     // Fallback for a link the sources contain but the finder read differently: never for an explicit http:// link.
     return c.scheme !== "http" && containsWhole(src, c.key);
   };
-  if (a.links.some((l) => !linkOk(l))) flags.push("unsupported_link");
+  // A link with a backslash is refused outright: no real FAQ link has one, and finders stop at it, so what follows would go unchecked.
+  const backslashLink = answer.split(/\s+/).some((t) => t.includes("\\") && (new RegExp(URL_SCHEME.source, "i").test(t) || new RegExp(DOMAIN.source, "i").test(t)));
+  if (backslashLink || a.links.some((l) => !linkOk(l))) flags.push("unsupported_link");
 
   const srcPhones = findPhones(sourceText);
   if (findPhones(answer).some((d) => !srcPhones.some((p) => p.endsWith(d) || d.endsWith(p)))) flags.push("unsupported_phone");
