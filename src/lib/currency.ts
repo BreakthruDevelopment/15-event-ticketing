@@ -15,7 +15,7 @@
 // (the IMF's Special Drawing Rights basket); otherwise it is its own currency. "10 dollars" is "$10"; "10 pesos" is not "₱10".
 const RESERVE = new Set(["usd", "eur", "jpy", "gbp", "cny"]);
 
-type Table = { signCode: Map<string, string>; wordCode: Map<string, string>; wordAlt: string };
+type Table = { signCode: Map<string, string>; wordCode: Map<string, string>; wordAlt: string; nameAlt: string; isoAlt: string };
 
 let memo: Table | undefined;
 
@@ -40,6 +40,7 @@ function build(): Table {
 
   // word -> code(s)
   const claims = new Map<string, Set<string>>();
+  const nameWords = new Set<string>();
   const claim = (word: string, code: string) => claims.set(word, (claims.get(word) ?? new Set()).add(code));
   for (const code of isoCodes) {
     claim(code, code);
@@ -47,7 +48,10 @@ function build(): Table {
     for (const v of [1, 2]) {
       const name = fmt(code, "name", v).replace(/^[\d.,\s ]+/, "").replace(/\s*\(.*\)\s*$/, "").trim().toLowerCase();
       const last = name.split(/\s+/).pop() ?? "";
-      if (/^\p{L}+$/u.test(last)) claim(last, code);
+      if (/^\p{L}+$/u.test(last)) {
+        claim(last, code);
+        nameWords.add(last);
+      }
     }
   }
   for (const [w, c] of [["buck", "usd"], ["bucks", "usd"], ["rmb", "cny"]] as const) claim(w, c); // colloquial; not in ICU's names
@@ -58,7 +62,8 @@ function build(): Table {
     wordCode.set(word, list.length === 1 ? list[0] : owner ?? `w:${word}`);
   }
   const wordAlt = [...wordCode.keys()].sort((a, b) => b.length - a.length).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-  return { signCode, wordCode, wordAlt };
+  const alt = (ws: Iterable<string>) => [...ws].sort((a, b) => b.length - a.length).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  return { signCode, wordCode, wordAlt, nameAlt: alt(nameWords), isoAlt: alt(isoCodes.map((c) => c.toUpperCase())) };
 }
 
 const table = () => (memo ??= build());
@@ -71,3 +76,7 @@ export const currencyOfWord = (word: string): string => table().wordCode.get(wor
 export const currencyWordAlt = (): string => table().wordAlt;
 /** A currency sign: any Unicode currency symbol. Regex source for the `u` flag. */
 export const CURRENCY_SIGN = String.raw`\p{Sc}`;
+/** Regex alternation of the currencies' English NAME words only ("dollars", "yen"), not ISO codes (several of those are ordinary words: "try", "all", "top"). */
+export const currencyNameAlt = (): string => table().nameAlt;
+/** Regex alternation of ISO codes in UPPERCASE ("USD"); match it case-sensitively. */
+export const currencyIsoAlt = (): string => table().isoAlt;

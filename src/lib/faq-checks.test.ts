@@ -686,3 +686,35 @@ describe("derived lists: the class, not the instances", () => {
     });
   });
 });
+
+// Codex 4582788038: "one dollar" was never checked, because a lone "one" is prose. A number word in money or time context is a
+// number. Covered: every number word (zero..ninety, hundred, thousand, dozen) always; "one" in context (after a currency sign,
+// before a currency name, an uppercase ISO code, or am/pm); "a"/"an" before dollar, euro, pound, yen, buck.
+describe("number words in money and time context are checked", () => {
+  const SRC = "Parking costs $10. Doors open at 6:30 PM CST. Tickets are free.";
+  const m: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: `Q\n${SRC}` }]]);
+  const run = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, m);
+
+  it("a price or time spelled as a word must be the source's price or time", () => {
+    for (const bad of [
+      "Parking costs one dollar.", "Parking costs One Dollar.", "Parking costs ONE DOLLARS.", "Parking costs a dollar.", "Parking costs an euro.", "Parking costs one euro.", "Parking costs one yen.",
+      "Parking costs one USD.", "Parking costs One EUR.", "Parking costs $one.", "Parking costs €one.", "Parking costs two dollars.", "Parking costs twenty dollars.", "Parking costs a hundred dollars.",
+      "Parking costs a thousand dollars.", "Parking costs a dozen dollars.", "Parking costs five bucks.", "Parking costs a buck.", "Doors open at one pm.", "Doors open at One PM.", "Doors open at one a.m.",
+      "Doors open at five pm.", "Doors open at twelve am.",
+    ]) {
+      expect(run(bad), bad).toMatchObject({ mode: "quoted", flags: expect.arrayContaining(["unsupported_number"]) });
+    }
+  });
+  it("the source's own price and time, spelled either way, pass", () => {
+    for (const good of ["Parking costs ten dollars.", "Parking costs $10.", "Doors open at half past six pm CST.".replace("half past six pm", "6:30 PM")]) expect(run(good).mode, good).toBe("model");
+    const one: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nParking costs one dollar. Doors open at one pm." }]]);
+    const r = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, one).mode;
+    for (const good of ["Parking costs one dollar.", "Parking costs $1.", "Parking costs a dollar.", "Doors open at 1 pm.", "Doors open at one pm."]) expect(r(good), good).toBe("model");
+    expect(r("Parking costs two dollars.")).toBe("quoted");
+  });
+  it("prose uses of \"one\" and \"a\" are still prose", () => {
+    for (const ok of ["One of the exits is by the front desk.", "No one is turned away.", "Come one hour before doors.", "Give it one try.", "One more thing: it is a real treat.", "There is a top-floor bar and a pen for you.", "One pizza each."]) {
+      expect(run(ok).flags, ok).not.toContain("unsupported_number");
+    }
+  });
+});

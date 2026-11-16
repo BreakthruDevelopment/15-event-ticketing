@@ -17,7 +17,7 @@
  * idea; the property test (`faq-checks.property.test.ts`) derives its oracle from the same authorities separately.
  */
 
-import { CURRENCY_SIGN, currencyOfSign, currencyOfWord, currencyWordAlt } from "./currency";
+import { CURRENCY_SIGN, currencyIsoAlt, currencyNameAlt, currencyOfSign, currencyOfWord, currencyWordAlt } from "./currency";
 import { classOf, hasNumericValue, parserDeletedClass, parserStrippedClass } from "./unicode-derived";
 
 export type Source = {
@@ -255,6 +255,16 @@ const MONEY_SYMBOL = new RegExp(`(${CURRENCY_SIGN})\\s?(${AMOUNT})`, "gu");
 const MONEY_SYMBOL_AFTER = new RegExp(`(${AMOUNT})\\s?(${CURRENCY_SIGN})`, "gu");
 let moneyWordRe: RegExp | undefined;
 const moneyWord = () => (moneyWordRe ??= new RegExp(`(${AMOUNT})\\s?(${currencyWordAlt()})\\b`, "g"));
+// "a dollar" is 1 dollar; "a real treat", "a try" are not. Declared, short, and tied to the oracle's own idea of the same line.
+const ARTICLE_UNITS = "dollars?|euros?|pounds?|yen|bucks?";
+let oneRes: { sign: RegExp; name: RegExp; iso: RegExp; article: RegExp } | undefined;
+const oneContexts = () =>
+  (oneRes ??= {
+    sign: new RegExp(`(?<=${CURRENCY_SIGN}\\s?)\\bone\\b`, "giu"),
+    name: new RegExp(`\\bone\\b(?=\\s?(?:${currencyNameAlt()}|[ap]\\.?m(?![\\p{L}\\p{N}]))(?![\\p{L}\\p{N}]))`, "giu"),
+    iso: new RegExp(`\\b[Oo][Nn][Ee]\\b(?=\\s?(?:${currencyIsoAlt()})(?![\\p{L}\\p{N}]))`, "gu"),
+    article: new RegExp(`\\b(?:a|an)\\s+(?=(?:${ARTICLE_UNITS})(?![\\p{L}\\p{N}]))`, "giu"),
+  });
 let romanContextRe: RegExp | undefined;
 const romanContext = () =>
   (romanContextRe ??= new RegExp(
@@ -278,9 +288,9 @@ const WEEKDAY_ABBR: Record<string, string> = { mon: "monday", tue: "tuesday", tu
 const SMALL: Record<string, number> = {
   zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
   thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30,
-  forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+  forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90, dozen: 12,
 };
-const NUM_WORD = `(?:${[...Object.keys(SMALL), "hundred", "thousand"].join("|")})`;
+const NUM_WORD = `(?:${[...Object.keys(SMALL), "dozen", "hundred", "thousand"].join("|")})`;
 // "one hundred and twenty": "and" joins only after hundred or thousand ("five and ten" stays two numbers).
 const NUM_WORDS_RE = new RegExp(`\\b${NUM_WORD}(?:[\\s-]+${NUM_WORD}|(?<=hundred|thousand)\\s+and\\s+${NUM_WORD})*\\b`, "g");
 
@@ -353,7 +363,14 @@ export function numberTokens(input: NumericText, ignore: Set<string> = new Set()
   // 3. ASCII letters only where they are used AS a number, not as a word ("a mix of demos", "30 cm"): straight after a
   //    currency sign, or straight before a currency word or am/pm ("iv dollars", "at ix pm"). The text is lower-cased FIRST,
   //    so "IV USD", "Iv dollars" and "iV dollars" are the same as "iv usd"; the sign and the words are the shared table's.
-  const lowered = plain.toLowerCase();
+  // 4. A number WORD in money or time context is a number. Every number word but "one" is always a number ("two", "twenty",
+  //    "a hundred": see `numberWordsToDigits`); "one" is also prose ("one of the exits", "no one"), so it is a number only in
+  //    context: right after a currency sign, or right before a currency name, an uppercase ISO code, or am/pm ("one dollar",
+  //    "one USD", "one pm"). The article reads as the quantity 1 before a currency unit ("a dollar", "an euro"). Where the line
+  //    is drawn: ISO codes count only in capitals (a lowercase "one try" is prose), and the article only before ARTICLE_UNITS.
+  const oneIn = oneContexts();
+  const wordsAsNumbers = plain.replace(oneIn.sign, "1").replace(oneIn.name, "1").replace(oneIn.iso, "1").replace(oneIn.article, "1 ");
+  const lowered = wordsAsNumbers.toLowerCase();
   for (const m of lowered.matchAll(romanContext())) {
     const t = (m[1] ?? m[2]).toUpperCase();
     if (t !== "I" && ROMAN_NUMERAL.test(t)) out.add(`r:${t}`);
@@ -402,7 +419,8 @@ export function numberTokens(input: NumericText, ignore: Set<string> = new Set()
   });
   // A character with a numeric value (Unicode Numeric_Type) that the numeric view could not turn into a digit must appear,
   // as itself, in the source.
-  // Read from `plain`, BEFORE lower-casing: lower-casing turns U+2183 (a numeral) into U+2184 (a letter) and would hide it.
+  // Read from `plain`, BEFORE lower-casing: lower-casing turns U+2183 into U+2184, and a numeral character must not be lost
+  // to a case mapping (neither is a numeral itself: both are letters in the UCD and in neither list).
   for (const m of plain.matchAll(/[^\x00-\x7f]/gu)) if (hasNumericValue(m[0])) out.add(`n:${m[0]}`);
   for (const m of s.match(NUMBER) ?? []) {
     const ordinal = /^(\d+)(?:st|nd|rd|th)$/.exec(m);

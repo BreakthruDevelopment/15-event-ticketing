@@ -144,6 +144,36 @@ function romans(raw: string): string[] {
   return out;
 }
 
+// Number WORDS. English spell-out is not in ICU or JS, so this list IS hand-written, here, declared, and built differently from
+// production's (positional arrays, not a keyed map). A number word is a number where it is used as one: right after a currency
+// sign, or right before a currency word (a name word, or an ISO code written in capitals: lowercase "try" is a word) or am/pm;
+// "a"/"an" is the quantity 1 before a dollar, euro, pound, yen or buck. Elsewhere ("one of the exits") it is prose.
+const ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"];
+const TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+const WORD_VALUE = new Map<string, number>([...ONES.map((w, i) => [w, i] as const), ...TENS.map((w, i) => [w, i * 10] as const).filter(([w]) => w), ["hundred", 100], ["thousand", 1000], ["dozen", 12]]);
+const NAME_WORDS = new Set([...CURRENCY_WORDS].filter((w) => !(w.length === 3 && Intl.supportedValuesOf("currency").includes(w.toUpperCase()))));
+const ISO_CODES = new Set(Intl.supportedValuesOf("currency"));
+function wordNumbers(raw: string): { all: number[]; inContext: number[] } {
+  const all: number[] = [];
+  const inContext: number[] = [];
+  for (const m of raw.matchAll(/[\p{L}]+/gu)) {
+    const word = m[0].toLowerCase();
+    const i = m.index as number;
+    const after = raw.slice(i + m[0].length).replace(/^\s/, "");
+    const next = /^\p{L}+/u.exec(after)?.[0] ?? "";
+    const prev = raw.slice(0, i).replace(/\s$/, "");
+    const isNumberWord = WORD_VALUE.has(word);
+    const article = (word === "a" || word === "an") && /^(dollars?|euros?|pounds?|yen|bucks?)$/i.test(next);
+    if (!isNumberWord && !article) continue;
+    const v = article ? 1 : (WORD_VALUE.get(word) as number);
+    all.push(v);
+    const money = NAME_WORDS.has(next.toLowerCase()) || ISO_CODES.has(next);
+    const clock = /^[ap]\.?m(?![\p{L}\p{N}])/iu.test(after);
+    if (article || /\p{Sc}$/u.test(prev) || money || clock) inContext.push(v);
+  }
+  return { all, inContext };
+}
+
 // A Roman numeral by arithmetic: value it, write that value back canonically, and compare.
 function isRoman(t: string): boolean {
   const V: Record<string, number> = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
@@ -222,6 +252,9 @@ function ungrounded(answer: string, source: string): string[] {
   // numerals that are not digits: a Roman or CJK numeral the source does not itself contain
   const sourceRomans = new Set(romans(source));
   for (const r of romans(answer)) if (!sourceRomans.has(r)) found.push(`R${r}`);
+  const sourceWords = wordNumbers(source).all;
+  const sourceDigits = (ns.match(NUMBER_VALUE) ?? []).map(value);
+  for (const v of wordNumbers(answer).inContext) if (!sourceWords.includes(v) && !sourceDigits.includes(String(v))) found.push(`W${v}`);
   for (const ch of na) if ((ch.codePointAt(0) as number) > 0x7f && isUcdNumeric(ch.codePointAt(0) as number) && !DIGIT_OF.has(ch) && !ns.includes(ch)) found.push(`N${ch}`);
   return found;
 }
@@ -267,6 +300,8 @@ const ATOMS = [
   "Doors open on December 4.", "Doors open on December 5.", "Doors open on December 14.", "Doors open on December 4, 2026.",
   "Call 512-555-9999.", "Call 512-555-9998.", "Call (512) 555-9999.", "Call 512 555 9999.", "Refunds up to 2 hours.", "Refunds up to 3 hours.", "Refunds up to 20 hours.", "Refunds up to 0 hours.",
   "Parking is $\u2179.", "Parking is $\u2173.", "Parking is $\u217b.", "Parking is $\u2170\u2179.", "Doors open at \u2173 pm.", "Parking is iv dollars.", "Parking is $iv.", "Doors open at ix pm.", "We have a mix of demos.", "There is 30 cm of room.",
+  "Parking is one dollar.", "Parking is One Dollar.", "Parking is a dollar.", "Parking is one USD.", "Parking is $one.", "Parking is two dollars.", "Parking is a hundred dollars.", "Parking is ten dollars.", "Doors open at one pm.", "Doors open at five PM.", "Doors open at six p.m.",
+  "One of the exits is by the desk.", "No one is turned away.", "Come one hour before doors.", "Give it one try.", "It is a real treat.", "Parking is an euro.", "Parking is a dozen dollars.",
   "Tickets are X dollars.", "Parking is $\u2169.", "Tickets are \u5341 dollars.", "Tickets are \u58f9\u4f70 dollars.", "The XIV Summit.", "The XV Summit.", "Parking is $\u4e00\u3007.", "I think so, and see C or D.",
 ];
 function inScript(text: string, r: () => number): string {
@@ -350,6 +385,10 @@ describe("grounding property: an ungrounded domain, email, host, number or numer
     expect(ungrounded("Parking is $\u0661\u0660\u0660.", NUMERIC_SOURCE)).toEqual(["#100"]);
     expect(ungrounded("Parking is $\u216d.", NUMERIC_SOURCE)).toEqual(["RC"]);
     expect(ungrounded("Tickets are \u5341 dollars.", NUMERIC_SOURCE)).toEqual(["N\u5341"]);
+    // number words in money/time context are numbers; in prose they are not
+    expect(ungrounded("Parking is one dollar.", NUMERIC_SOURCE)).toEqual(["W1"]);
+    expect(ungrounded("Parking is a dollar, at one pm.", NUMERIC_SOURCE)).toEqual(["W1", "W1"]);
+    expect(ungrounded("Parking is ten dollars. One of the exits; no one; give it one try.", NUMERIC_SOURCE)).toEqual([]);
     expect(ungrounded("The XIV Summit, I think, and CIVIL MILD.", NUMERIC_SOURCE)).toEqual(["RXIV"]);
     // the host view does not fold other scripts' digits; UTS46 does map circled and fullwidth forms
     expect(ungrounded("Go to tickets\u0662026.example/vip", SOURCES[6])).not.toEqual([]);
