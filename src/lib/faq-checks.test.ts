@@ -99,3 +99,34 @@ describe("quotedText", () => {
     );
   });
 });
+
+describe("calendar words and number words are facts too", () => {
+  const dateSrc: SourceMap = new Map([
+    ["E1", { id: "E1", kind: "event", label: "when", text: "When: starts Thursday, December 3, 2026 at 7:00 PM CST. Doors open at 6:30 PM." }],
+    ["F2", { id: "F2", kind: "faq", label: "Cost", text: "Cost\nParking is $10. Kids under twelve are free." }],
+  ]);
+  const chk = (answer: string, ids: string[]) => checkFaqAnswer({ status: "answered", answer, citations: ids }, dateSrc);
+
+  it("a different month, day or weekday is quoted, the right date passes", () => {
+    expect(chk("It is on Thursday, December 3, 2026.", ["E1"]).mode).toBe("model");
+    expect(chk("It is on Dec 3.", ["E1"]).mode).toBe("model");
+    expect(chk("It is on 3 December.", ["E1"]).mode).toBe("model");
+    expect(chk("It is on January 3, 2026.", ["E1"])).toMatchObject({ mode: "quoted", flags: ["unsupported_number"] });
+    expect(chk("It is on December 4, 2026.", ["E1"]).mode).toBe("quoted");
+    expect(chk("It is on Friday, December 3.", ["E1"]).mode).toBe("quoted");
+    expect(chk("See you Fri, Dec 3.", ["E1"]).mode).toBe("quoted");
+  });
+  it("'may' as a verb is not a month", () => {
+    expect(chk("You may arrive at 6:30 PM.", ["E1"]).mode).toBe("model");
+    expect(chk("It is on May 3.", ["E1"]).mode).toBe("quoted");
+  });
+  it("number words count as numbers", () => {
+    expect(chk("Parking is ten dollars.", ["F2"]).mode).toBe("model");
+    expect(chk("Parking is twelve dollars.", ["F2"]).mode).toBe("quoted");
+    expect(chk("Parking is ten dollars.", ["E1"]).mode).toBe("quoted");
+    expect(chk("Kids under twelve are free.", ["F2"]).mode).toBe("model");
+    expect(chk("Kids under thirteen are free.", ["F2"]).mode).toBe("quoted");
+    expect([...numberTokens("twenty-five, one hundred twenty, five and ten")].sort()).toEqual(["10", "120", "25", "5"]);
+    expect(chk("One of the rooms is free.", ["F2"]).mode).toBe("model");
+  });
+});

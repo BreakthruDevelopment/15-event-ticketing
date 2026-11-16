@@ -563,6 +563,24 @@ describe.skipIf(!url)("FAQ entries and the FAQ bot (Postgres)", () => {
       expect(await askRows(ev.id)).toHaveLength(1);
     });
 
+    it("a cache-hit ask is recorded under its op id: after the FAQ changes, a replay returns the same answer with no model call and no charge", async () => {
+      const ev = await withParking();
+      const run = model(PARK);
+      await ASK.askFaq(att, ev.id, q("Where can I leave my car?"), { run });
+      const body = q("where can I leave my car");
+      const hit = await ASK.askFaq(att2, ev.id, body, { run });
+      expect(hit.mode).toBe("cached");
+      await add(ev, "Is there Wi-Fi?", "Yes.");
+      await sql`update faq_ask set created_at = now() - interval '30 hours' where event_id = ${ev.id}`;
+      const again = await ASK.askFaq(att2, ev.id, body, { run });
+      expect(again).toEqual({ ...hit, replayed: true });
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(await count("", att2.id, "ai")).toBe(0);
+      expect(await askRows(ev.id)).toHaveLength(1);
+      // the id can't be reused for another question
+      await expect(ASK.askFaq(att2, ev.id, { ...body, question: "Something else?" }, { run })).rejects.toMatchObject({ status: 409, code: "op_id_reused" });
+    });
+
     it("the cache misses after an FAQ edit (create, update, delete) and hits again on the new version", async () => {
       const ev = await withParking();
       const run = model(PARK);

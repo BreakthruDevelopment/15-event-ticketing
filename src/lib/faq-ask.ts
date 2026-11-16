@@ -26,7 +26,8 @@ import { spendRead } from "@/lib/write-tx";
  *  3. draft, hidden and missing events are the same 404; a cancelled one is 409 `event_cancelled`; the event's own
  *     organiser may try the bot on any of their events (nothing of that is stored);
  *  4. a retry (same op id) returns the first answer: no charge, no model call; the same op id for another question is 409;
- *  5. a cached answer for the same (event, `faq_version`, normalised question) from the last 24 h is returned: no charge;
+ *  5. a cached answer for the same (event, `faq_version`, normalised question) from the last 24 h is returned and recorded
+ *     under the op id (so a replay returns it even after the FAQ changed): no charge;
  *  6. otherwise ONE short transaction claims the ask (the op-ledger row, the user's `ai` allowance 10/hour, the event's
  *     300-per-day count, the app-wide `AI_DAILY_CAP`) and, for an attendee, inserts the `faq_ask` row as `pending`, so
  *     the per-event count is exact even with answers in flight; a refusal anywhere rolls all of it back;
@@ -266,7 +267,21 @@ export async function askFaq(actor: Actor | null, rawEventId: string, input: unk
   const qHash = qHashOf(data.question);
   if (!sessionOwner) {
     const cached = await findCached(snap, qHash, sources);
-    if (cached) return { ...cached, replayed: false };
+    if (cached) {
+      // Record the answer under the op id (no charge, no claim), so a retry after a lost response returns THIS answer
+      // even once the FAQ changed or the cache expired, and the id can't be reused for another question.
+      const [mine] = await db()
+        .insert(L)
+        .values({ actorId: actor.id, clientOpId: data.clientOpId, kind: KIND, payloadHash: hash, result: cached })
+        .onConflictDoNothing()
+        .returning({ id: L.clientOpId });
+      if (!mine) {
+        const first = await readLedger(db(), actor.id, data.clientOpId);
+        if (!first) throw new CodedConflictError("retry", "That question is still being answered. Try again in a moment.");
+        return { ...interpret(first, hash), replayed: true };
+      }
+      return { ...cached, replayed: false };
+    }
   }
 
   const claimed = await claim(actor, snap, data, hash, qHash);

@@ -95,6 +95,39 @@ const TIME_12H = /\b(\d{1,2})(?::(\d{2}))?\s?([ap])\.?m\b\.?/g;
 const TIME_24H = /\b([01]?\d|2[0-3]):([0-5]\d)\b/g;
 const NUMBER = /[a-z]*\d+(?:[.,]\d+)*[a-z]*/g;
 
+const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+const WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+const MONTH_RE = "(?:january|february|march|april|june|july|august|september|october|november|december)";
+// Abbreviations only where they can't be an ordinary word: a month before a day number ("Dec 3"), "May" only before a day number.
+const MONTH_ABBR: Record<string, string> = { jan: "january", feb: "february", mar: "march", apr: "april", jun: "june", jul: "july", aug: "august", sep: "september", sept: "september", oct: "october", nov: "november", dec: "december" };
+const WEEKDAY_ABBR: Record<string, string> = { mon: "monday", tue: "tuesday", tues: "tuesday", wed: "wednesday", thu: "thursday", thur: "thursday", thurs: "thursday", fri: "friday", sat: "saturday", sun: "sunday" };
+
+const SMALL: Record<string, number> = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30,
+  forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+};
+const NUM_WORD = `(?:${[...Object.keys(SMALL), "hundred", "thousand"].join("|")})`;
+const NUM_WORDS_RE = new RegExp(`\\b${NUM_WORD}(?:(?:[\\s-]+)${NUM_WORD})*\\b`, "g");
+
+/** "ten" -> "10", "twenty-five" -> "25", "one hundred" -> "100". A lone "one" stays a word ("one of the rooms"). */
+function numberWordsToDigits(s: string): string {
+  return s.replace(NUM_WORDS_RE, (m) => {
+    const words = m.split(/[\s-]+/).filter((w) => w !== "and");
+    if (words.length === 1 && words[0] === "one") return m;
+    let total = 0;
+    let cur = 0;
+    for (const w of words) {
+      if (w === "hundred") cur = (cur || 1) * 100;
+      else if (w === "thousand") {
+        total += (cur || 1) * 1000;
+        cur = 0;
+      } else cur += SMALL[w];
+    }
+    return String(total + cur);
+  });
+}
+
 const canonNumber = (raw: string) => {
   const n = Number(raw.replace(/,/g, ""));
   return Number.isFinite(n) ? String(n) : raw;
@@ -109,6 +142,18 @@ export function numberTokens(input: string, ignore: Set<string> = new Set()): Se
   let s = input.toLowerCase();
   for (const id of ignore) s = s.replace(new RegExp(`\\b${id.toLowerCase()}\\b`, "g"), " ");
   const out = new Set<string>();
+  // Calendar words are facts too: a month, a weekday and a month-and-day pair must each appear in a cited source
+  // ("January 3" against a source that says "December 3" is a different date; so is "Friday" for "Thursday").
+  s = numberWordsToDigits(s);
+  s = s.replace(new RegExp(`\\b(${Object.keys(MONTH_ABBR).join("|")})\\.?(?=\\s*\\d)`, "g"), (_m, a: string) => MONTH_ABBR[a]);
+  s = s.replace(/\bmay(?=\s+\d)/g, "may!");
+  s = s.replace(new RegExp(`\\b(${Object.keys(WEEKDAY_ABBR).join("|")})(?=[.,])`, "g"), (_m, a: string) => WEEKDAY_ABBR[a]);
+  const monthDay = (month: string, day: string) => out.add(`d:${month}-${Number(day)}`);
+  for (const m of s.matchAll(new RegExp(`\\b(${MONTH_RE}|may!)\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, "g"))) monthDay(m[1].replace("!", ""), m[2]);
+  for (const m of s.matchAll(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?(${MONTH_RE}|may!)`, "g"))) monthDay(m[2].replace("!", ""), m[1]);
+  for (const w of [...MONTHS.filter((x) => x !== "may"), "may!", ...WEEKDAYS]) {
+    if (new RegExp(w === "may!" ? "may!" : `\\b${w}\\b`).test(s)) out.add(`w:${w.replace("!", "")}`);
+  }
   s = s.replace(MONEY_SYMBOL, (_m, n: string) => {
     out.add(`$${canonNumber(n)}`);
     return " ";
