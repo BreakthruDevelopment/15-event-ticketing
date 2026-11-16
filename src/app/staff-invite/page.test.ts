@@ -62,13 +62,13 @@ describe("staff invite page", () => {
     expect(signedInProp(tree)).toBe(true);
   });
 
-  it("limits an unauthenticated burst per IP and shows a friendly wait screen without the invite form", async () => {
+  it("limits an unauthenticated burst per IP, shows a wait screen without the invite form, and skips the page-level session lookup", async () => {
     for (let i = 0; i < PUBLIC_LIMIT_PER_MINUTE; i++) expect(signedInProp(await StaffInvitePage())).toBe(false);
     const lookupsBefore = current.lookups;
     const limited = await StaffInvitePage();
     expect(signedInProp(limited)).toBeUndefined(); // no <AcceptInvite>, so no sign-in form
     expect(textOf(limited)).toContain("Wait about a minute");
-    expect(current.lookups).toBe(lookupsBefore); // refused before any session lookup
+    expect(current.lookups).toBe(lookupsBefore); // the page skips its own getCurrentUser(); the shared app shell still does its own lookup on every render
   });
 
   it("counts the last X-Forwarded-For entry (Cloud Run), so one client cannot dodge the limit by spoofing the first", async () => {

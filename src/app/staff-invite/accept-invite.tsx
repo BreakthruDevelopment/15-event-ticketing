@@ -5,7 +5,7 @@ import { SignInForm } from "@/app/sign-in/sign-in-form";
 import { buttonPrimary } from "@/components/ui/styles";
 import { useAsyncAction } from "@/lib/use-async-action";
 import { acceptInviteAction } from "./actions";
-import { hrefWithoutHash, tokenFromHash, type FragmentToken } from "./token";
+import { acceptThenClear, hrefWithoutHash, keepToken, tokenFromHash, type FragmentToken } from "./token";
 
 type Accepted = { title: string; replayed: boolean; token: string };
 
@@ -29,7 +29,11 @@ function hashOnServer() {
  */
 export function AcceptInvite({ signedIn }: { signedIn: boolean }) {
   const hash = useSyncExternalStore(subscribeToHash, hashInBrowser, hashOnServer);
-  const fragment: FragmentToken = tokenFromHash(hash);
+  // The invite is held in state, not re-read from the hash on every render: a later fragment without `t` (the shell's
+  // "Skip to content" link sets `#main`) must not destroy it. It lives only in this component's state.
+  const [held, setHeld] = useState<FragmentToken>({ status: "missing" });
+  const fragment = keepToken(held, tokenFromHash(hash));
+  if (fragment !== held) setHeld(fragment);
   const [accepted, setAccepted] = useState<Accepted | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [justSignedIn, setJustSignedIn] = useState(false);
@@ -41,7 +45,10 @@ export function AcceptInvite({ signedIn }: { signedIn: boolean }) {
     setFormError(null);
     let result: Awaited<ReturnType<typeof acceptInviteAction>>;
     try {
-      result = await acceptInviteAction(token);
+      result = await acceptThenClear(
+        () => acceptInviteAction(token),
+        () => window.history.replaceState(null, "", hrefWithoutHash(window.location.href)),
+      );
     } catch {
       throw new Error("request failed");
     }
@@ -49,7 +56,6 @@ export function AcceptInvite({ signedIn }: { signedIn: boolean }) {
       setFormError(result.error);
       return;
     }
-    window.history.replaceState(null, "", hrefWithoutHash(window.location.href));
     setAccepted({ title: result.title, replayed: result.replayed, token });
   }, "Could not join the door team. Try the link again.");
 
