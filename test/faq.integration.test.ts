@@ -906,6 +906,74 @@ describe.skipIf(!url)("FAQ entries and the FAQ bot (Postgres)", () => {
         expect(after.daily).toBe(1);
       });
 
+      const OTHER: FaqModelOutput = { status: "answered", answer: "Park anywhere on Lamar Street, it is all free.", citations: ["F1"] };
+
+      it("a loser whose model call returns after the takeover settled gets the winner's answer, replayed, and writes nothing", async () => {
+        const ev = await withParking();
+        const body = q("Where can I leave my car?");
+        const loser = gated();
+        const lostOutcome = ASK.askFaq(att, ev.id, body, { run: loser.run }).catch((e) => e);
+        await loser.started;
+        const [e] = await sql`select id, version from faq_entry where event_id = ${ev.id}`;
+        await FAQ.updateFaqEntry(org, ev.id, e.id, { answer: "Lamar Street garage next to the venue, $10 for the evening.", version: e.version, clientOpId: uuid() });
+        await age(body.clientOpId, 200);
+        expect(await ASK.askFaq(att, ev.id, body, { run: model(PARK) })).toMatchObject({ text: PARK.answer, replayed: false });
+        const before = await state(ev, body.clientOpId);
+        expect(before.asks[0].faq_version).toBe(await faqVersion(ev.id));
+        loser.ok(OTHER);
+        expect(await lostOutcome).toMatchObject({ status: "answered", text: PARK.answer, replayed: true });
+        expect(await state(ev, body.clientOpId)).toEqual(before);
+      });
+
+      it("a loser that returns while the winner is still answering gets 409 retry and changes nothing", async () => {
+        const ev = await withParking();
+        const body = q("Where can I leave my car?");
+        const loser = gated();
+        const lostOutcome = ASK.askFaq(att, ev.id, body, { run: loser.run }).catch((e) => e);
+        await loser.started;
+        await age(body.clientOpId, 200);
+        const winner = gated();
+        const won = ASK.askFaq(att, ev.id, body, { run: winner.run });
+        await winner.started;
+        const before = await state(ev, body.clientOpId);
+        loser.ok(OTHER);
+        expect(await lostOutcome).toMatchObject({ status: 409, code: "retry" });
+        expect(await state(ev, body.clientOpId)).toEqual(before);
+        winner.ok(PARK);
+        expect(await won).toMatchObject({ text: PARK.answer, replayed: false });
+        expect((await askRows(ev.id))[0]).toMatchObject({ status: "answered", answer: PARK.answer });
+      });
+
+      it("race probe: loser and winner settling at the same moment never deadlock and leave one consistent answer", async () => {
+        for (let i = 0; i < 6; i++) {
+          const ev = await withParking();
+          const body = q(`Where can I leave my car? ${i}`);
+          const loser = gated();
+          const lostOutcome = ASK.askFaq(att, ev.id, body, { run: loser.run }).catch((e) => e);
+          await loser.started;
+          await age(body.clientOpId, 200);
+          const winner = gated();
+          const won = ASK.askFaq(att, ev.id, body, { run: winner.run });
+          await winner.started;
+          if (i % 2) loser.ok(OTHER);
+          else loser.fail();
+          winner.ok(PARK);
+          const [a, b] = await Promise.race([Promise.all([lostOutcome, won]), sleep(8000).then(() => "deadlock" as const)]).then((r) => {
+            if (r === "deadlock") throw new Error("deadlock");
+            return r;
+          });
+          expect(b).toMatchObject({ text: PARK.answer, replayed: false });
+          if (a instanceof AiError) expect(i % 2).toBe(0);
+          else if ("replayed" in a) expect(a).toMatchObject({ text: PARK.answer, replayed: true });
+          else expect(a).toMatchObject({ status: 409, code: "retry" });
+          const rows = await askRows(ev.id);
+          expect(rows).toHaveLength(1);
+          expect(rows[0]).toMatchObject({ status: "answered", answer: PARK.answer });
+          expect(rows[0].flags).not.toContain("pending");
+        }
+        expect(await count("", att.id, "ai")).toBe(6);
+      });
+
       it("a takeover stores the answer under the faq_version it was answered against", async () => {
         const ev = await withParking();
         const body = q("Where can I leave my car?");

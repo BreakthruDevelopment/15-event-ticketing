@@ -460,19 +460,39 @@ export async function askFaq(actor: Actor | null, rawEventId: string, input: unk
       citations: citationViews(sources, result.citations),
       demo: result.demo,
     };
-    await db().transaction(async (tx) => {
+    // The ledger write is the fence: it lands only while this request still owns the claim (same token as abandon()).
+    // Ledger row first, then the ask row, the same order as abandon(); the takeover takes the ledger row before anything else.
+    const owned = await db().transaction(async (tx) => {
+      const [mine] = await tx
+        .update(L)
+        .set({ result: response })
+        .where(
+          and(
+            eq(L.actorId, actor.id),
+            eq(L.clientOpId, data.clientOpId),
+            sql`(${L.result} is null or jsonb_exists(${L.result}, 'claim'))`,
+            sql`extract(epoch from ${L.createdAt})::text = ${claimed.token}`,
+          ),
+        )
+        .returning({ id: L.clientOpId });
+      if (!mine) return false;
       if (claimed.askId) {
         await tx
           .update(A)
           .set({ status: result.status, answer: result.mode === "model" ? result.answer : null, citations: result.citations, mode: result.mode, flags, faqVersion: snap.event.faqVersion })
           .where(eq(A.id, claimed.askId));
       }
-      await tx
-        .update(L)
-        .set({ result: response })
-        .where(and(eq(L.actorId, actor.id), eq(L.clientOpId, data.clientOpId)));
       await pruneOld(tx);
+      return true;
     });
+    if (!owned) {
+      // Another request took the claim over while this model call ran. One op id, one answer: hand back the winner's
+      // stored answer (the charge this request made became the winner's, so nothing is refunded and nothing is written).
+      const cur = await readLedger(db(), actor.id, data.clientOpId);
+      const stored = cur ? interpret(cur, hash) : null;
+      if (stored && !("expired" in stored) && !("ref" in stored)) return { ...stored, replayed: true };
+      throw new CodedConflictError("retry", STILL_RUNNING);
+    }
   } catch (err) {
     await abandon(actor, claimed.askId, data.clientOpId, claimed.token);
     throw err;
