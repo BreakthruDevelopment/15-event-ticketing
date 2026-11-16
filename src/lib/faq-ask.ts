@@ -259,6 +259,9 @@ async function findCached(snap: Snapshot, qHash: string, sources: SourceMap): Pr
 async function recordCacheHit(actor: Actor, opId: string, hash: string, askId: string, version: number): Promise<typeof L.$inferSelect | null> {
   return db().transaction(async (tx) => {
     await advisoryLock(tx, `faq-cached:${actor.id}`);
+    // A duplicate of an operation that already has its row is replayed, never charged to the allowance or refused by it.
+    const existing = await readLedger(tx, actor.id, opId);
+    if (existing) return existing;
     const [{ n }] = await tx
       .select({ n: count() })
       .from(L)

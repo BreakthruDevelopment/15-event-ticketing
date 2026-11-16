@@ -633,6 +633,21 @@ describe.skipIf(!url)("FAQ entries and the FAQ bot (Postgres)", () => {
       expect(await count("", att2.id, "ai")).toBe(0);
     });
 
+    it("a parallel duplicate of the 60th cache-hit ask is replayed, not refused by the allowance its twin just used", async () => {
+      const ev = await withParking();
+      const run = model(PARK);
+      await ASK.askFaq(att, ev.id, q("Where can I leave my car?"), { run });
+      const [{ id: askId }] = await sql`select id from faq_ask where event_id = ${ev.id}`;
+      await sql`insert into op_ledger (actor_id, client_op_id, kind, payload_hash, result)
+                select ${att2.id}, gen_random_uuid(), 'faq-ask', 'x' || g, jsonb_build_object('ref', ${askId}::text, 'v', 1) from generate_series(1, ${FAQ_LIMITS.cachedPerHour - 1}::int) g`;
+      const body = q("where can I leave my car");
+      const out = await Promise.all([1, 2, 3, 4, 5].map(() => ASK.askFaq(att2, ev.id, body, { run })));
+      for (const o of out) expect(o).toMatchObject({ mode: "cached", text: PARK.answer });
+      expect(out.filter((o) => !o.replayed)).toHaveLength(1);
+      expect(await ledgerCount(att2.id)).toBe(FAQ_LIMITS.cachedPerHour);
+      expect(run).toHaveBeenCalledTimes(1);
+    });
+
     it("ask ledger rows older than 48 hours are pruned (by a cache hit and by a full ask), other kinds are left alone", async () => {
       const ev = await withParking();
       const run = model(PARK);
