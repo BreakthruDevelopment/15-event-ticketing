@@ -17,6 +17,22 @@ const nextConfig: NextConfig = {
       },
     },
   },
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [{ key: "Permissions-Policy", value: "camera=()" }],
+      },
+      {
+        source: "/door",
+        headers: [{ key: "Permissions-Policy", value: "camera=(self)" }],
+      },
+      {
+        source: "/door/:path*",
+        headers: [{ key: "Permissions-Policy", value: "camera=(self)" }],
+      },
+    ];
+  },
 };
 
 export default nextConfig;
