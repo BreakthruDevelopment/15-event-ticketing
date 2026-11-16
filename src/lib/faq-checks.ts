@@ -166,8 +166,8 @@ export function findPhones(text: Norm): string[] {
 
 /**
  * An answer link must EQUAL a source link, byte for byte, after only these: the scheme and host are lower-cased; the
- * answer may leave the scheme out (but never states a different one: "http://" is not "https://"); one trailing "/" more
- * or less. Nothing is repaired into equality: no decoding, no case folding of path/query, no "www." added or dropped, no
+ * answer may leave the scheme out (but never states a different one: "http://" is not "https://"); one trailing "/" of the path more
+ * or less (never inside a query or fragment). Nothing is repaired into equality: no decoding, no case folding of path/query, no "www." added or dropped, no
  * default ports. The model is repeating links from sources we gave it, so it has no reason to vary one; a false alarm
  * only degrades to the quoted source (which prints the real link), a miss serves a bad link to everyone for 24 h.
  */
@@ -177,7 +177,11 @@ export function parseLink(link: string): { scheme: "http" | "https" | ""; key: s
   const cut = rest.search(/[/?#]/);
   const host = (cut < 0 ? rest : rest.slice(0, cut)).toLowerCase();
   const tail = cut < 0 ? "" : rest.slice(cut);
-  return { scheme: (m ? m[1].toLowerCase() : "") as "http" | "https" | "", key: (host + tail).replace(/\/$/, "") };
+  // The one trailing slash that may differ is the PATH's ("host/" is "host"); a slash inside a query or fragment is data.
+  const pathEnd = tail.search(/[?#]/);
+  const path = pathEnd < 0 ? tail : tail.slice(0, pathEnd);
+  const rest2 = pathEnd < 0 ? "" : tail.slice(pathEnd);
+  return { scheme: (m ? m[1].toLowerCase() : "") as "http" | "https" | "", key: host + path.replace(/\/$/, "") + rest2 };
 }
 
 /**

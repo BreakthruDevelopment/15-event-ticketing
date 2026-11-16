@@ -265,6 +265,15 @@ describe("links: an answer link must equal a source link", () => {
     caught("Email hello@austinproductmeetup.example.", "Refunds at https://hello@austinproductmeetup.example/refund-form today.");
     fine("Email hello@austinproductmeetup.example.", "Email hello@austinproductmeetup.example.");
   });
+  it("only the path's trailing slash may differ; a slash inside a query or fragment is data", () => {
+    const S = "Go to https://tickets.example.com/?return=/VIP/ today.";
+    caught(S, "Go to https://tickets.example.com/?return=/VIP today.");
+    caught("Go to https://tickets.example.com/?return=/VIP today.", "Go to https://tickets.example.com/?return=/VIP/ today.");
+    caught("Go to https://tickets.example.com/#/VIP/ today.", "Go to https://tickets.example.com/#/VIP today.");
+    fine(S, "Go to https://tickets.example.com/?return=/VIP/ today.");
+    fine(S, "Go to tickets.example.com?return=/VIP/ today."); // the path's own "/" before the query may be left out
+    fine("Go to https://tickets.example.com/EventPass/ today.", "Go to https://tickets.example.com/EventPass today.");
+  });
   it("a prefix of a longer link never stands in for it, whatever character the cut lands on", () => {
     for (const sep of ["~", ":", "=", "&", "+", "@", "?", "#", "\\"]) {
       const full = `https://tickets.example.com/Event${sep}Pass`;

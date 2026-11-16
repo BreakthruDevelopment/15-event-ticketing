@@ -65,15 +65,31 @@ const HOST_AFTER_SCHEME = /[a-z][a-z0-9+.-]*:\/\/([^\s/?#\\]+)/g;
  *    case-insensitive substring of the source, scheme included when the answer states one;
  *  - numbers: every digit run (after reading any script's digits) must be a digit run the source has.
  */
+/** `t` occurs in `s` as a whole token: followed by whitespace, the end, or sentence punctuation that is itself followed by one of those. */
+function appears(s: string, t: string): boolean {
+  for (let i = s.indexOf(t); i >= 0; i = s.indexOf(t, i + 1)) {
+    const after = s[i + t.length];
+    const next = s[i + t.length + 1];
+    if (after === undefined || /\s/.test(after)) return true;
+    if (/[.,;:!?)\]>'"*_]/.test(after) && (next === undefined || /\s/.test(next))) return true;
+  }
+  return false;
+}
+
 function ungrounded(answer: string, source: string): string[] {
   const a = view(answer);
   const s = view(source);
-  const found: string[] = [...(a.match(DOMAIN_CRUDE) ?? []), ...(a.match(EMAIL_CRUDE) ?? []), ...[...a.matchAll(HOST_AFTER_SCHEME)].map((m) => m[1])];
+  const names = [...(a.match(DOMAIN_CRUDE) ?? []), ...(a.match(EMAIL_CRUDE) ?? []), ...[...a.matchAll(HOST_AFTER_SCHEME)].map((m) => m[1])].filter((f) => !s.includes(f));
+  const found: string[] = [...names];
   for (const token of a.split(/\s+/)) {
     const m = LINKISH.exec(token);
     if (!m) continue;
-    const t = m[0].replace(/[.,;:!?)\]>'"\u2019\u201d\u2039*_]+$/g, "").replace(/\/$/, "");
-    if (t && !s.includes(t)) found.push(t);
+    const t = m[0].replace(/[.,;:!?)\]>'"\u2019\u201d\u2039*_]+$/g, "");
+    // only the path's trailing slash may differ, never one inside a query or fragment
+    const tt = /[?#]/.test(t) ? t : t.replace(/\/$/, "");
+    // ("host?q" and "host/?q" are the same page: the empty path may be written either way)
+    const bare = tt.replace(/^((?:[a-z][a-z0-9+.-]*:\/\/)?[^/?#]+)([?#])/, "$1/$2");
+    if (tt && !appears(s, tt) && !appears(s, bare)) found.push(tt);
   }
   // A path/query is compared as written: if reading it the way a browser reads a host (folding, dropping invisibles) would
   // change it, the answer has changed what a browser keeps.
@@ -87,7 +103,7 @@ function ungrounded(answer: string, source: string): string[] {
   }
   const sourceRuns = new Set(s.match(/[0-9]+/g) ?? []);
   for (const run of a.match(/[0-9]+/g) ?? []) if (!sourceRuns.has(run)) found.push(`#${run}`);
-  return found.filter((f) => f.startsWith("#") || f.startsWith("~") || !s.includes(f));
+  return found;
 }
 
 const NUMERIC_SOURCE = "Parking is $10. Doors open at 9:30 PM CST on December 4. Call 512-555-9999. Refunds up to 2 hours.";
@@ -97,6 +113,7 @@ const SOURCES = [
   "Visit tickets.example.com today, or write to hello@austinproductmeetup.example.",
   NUMERIC_SOURCE,
   "Tickets at https://\u0632\u064a\u062a\u0648\u0646.example/pay today.",
+  "Go to https://tickets.example.com/?return=/VIP/ today.",
 ];
 const mapFor = (text: string): SourceMap => new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: `Q\n${text}` }]]);
 
@@ -109,7 +126,7 @@ const HOSTS = [
   "evil@austinproductmeetup.example", "hello@evil.test", "localhost", "10.0.0.1", "evil",
 ];
 const WRAPS = ["", "(", "[", "<", "‹", "“", "**", "_", "[x](", "see:", "see/", "see(", "tickets—", "\\", "//", "x", "mailto:", "https://", "http://", "HTTPS://", "xhttps://", "www.", "ftp://", "https://user@", "https:\\\\", "https:/\\", " "];
-const TAILS = ["", "/", "/\uff36\uff29\uff30", "/EventPass\u200b", "/Event\u00adPass", "?id=\uff11", "?id=\u0661", "/x", "/EventPass", "?q=1", "#f", "\\x", "\\..\\admin", "@evil.test", "-x/x#tickets.example.com/EventPass", "%2Fx", "%2fx", "/..", "//", "/%2e%2e/", ":443", ":8443", "?next=https://evil.test/x", "#@evil.test", "​/x", "~x", "+x", "=x", "&x"];
+const TAILS = ["", "/", "/?return=/VIP", "/?return=/VIP/", "?return=/VIP", "#/VIP", "#/VIP/", "/\uff36\uff29\uff30", "/EventPass\u200b", "/Event\u00adPass", "?id=\uff11", "?id=\u0661", "/x", "/EventPass", "?q=1", "#f", "\\x", "\\..\\admin", "@evil.test", "-x/x#tickets.example.com/EventPass", "%2Fx", "%2fx", "/..", "//", "/%2e%2e/", ":443", ":8443", "?next=https://evil.test/x", "#@evil.test", "​/x", "~x", "+x", "=x", "&x"];
 const CLOSERS = ["", ")", ">", "]", ".", ",", ").", "’", "**", "_", "”", "!", "?", "‹"];
 const SPACES = [" ", " ", " ", "  ", " ", " ", "　", "\t", "​", "⁠"];
 const FRAMES = ["Buy at %s today.", "Refunds: %s.", "See %s", "Write to %s for details.", "%s", "Go here: %s, then pay.", "[%s]", "<%s>", "Tickets are at %s today and %s tomorrow."];
@@ -137,6 +154,11 @@ function inScript(text: string, r: () => number): string {
 
 function answerFrom(r: () => number): string {
   const pick = <T,>(xs: T[]) => xs[Math.floor(r() * xs.length)];
+  if (r() < 0.3) {
+    // trailing slashes: only the path's may differ, never one inside a query or fragment
+    const link = pick(["https://tickets.example.com", "tickets.example.com", "https://tickets.example.com/", "https://tickets.example.com/EventPass"]) + pick(["", "/", "?return=/VIP", "?return=/VIP/", "/?return=/VIP", "/?return=/VIP/", "#/VIP", "#/VIP/", "/#/VIP/"]);
+    return `Go to ${link}${pick(["", ".", ")"])} today.`;
+  }
   if (r() < 0.4) {
     const parts = [pick(ATOMS), ...(r() < 0.5 ? [pick(ATOMS)] : [])];
     return parts.map((p) => inScript(p, r)).join(" ");
@@ -150,7 +172,7 @@ function answerFrom(r: () => number): string {
 }
 
 describe("grounding property: an ungrounded domain, email or host never passes as the model's answer", () => {
-  it("holds for 6000 seeded hostile answers against five sources", () => {
+  it("holds for 6000 seeded hostile answers against six sources", () => {
     // FAQ_PROPERTY_SEED / FAQ_PROPERTY_RUNS widen the hunt locally; CI uses the fixed defaults.
     const r = rng(Number(process.env.FAQ_PROPERTY_SEED ?? 20261115));
     const failures: string[] = [];
