@@ -262,6 +262,15 @@ describe("a link may not be redirected with a backslash, or cut short", () => {
       fine(`Buy at ${full} today.`, `Buy at ${full} today.`);
     }
   });
+  it("a bare domain with a query or fragment but no path is compared in full", () => {
+    caught("Buy at https://tickets.example.com/?tier=VIP today.", "Buy at tickets.example.com?tier=General today.");
+    caught("Buy at https://tickets.example.com/?tier=VIP today.", "Buy at tickets.example.com/?tier=General today.");
+    caught("Buy at https://tickets.example.com/#Seats today.", "Buy at tickets.example.com#Other today.");
+    caught("Buy at tickets.example.com?tier=VIP today.", "Buy at tickets.example.com today.");
+    fine("Buy at https://tickets.example.com/?tier=VIP today.", "Buy at tickets.example.com?tier=VIP today.");
+    fine("Buy at tickets.example.com?tier=VIP today.", "Buy at https://tickets.example.com/?tier=VIP today.");
+    expect(findLinksAndEmails("Go to tickets.example.com?tier=VIP.").links).toEqual(["tickets.example.com?tier=VIP"]);
+  });
   it("a dropped query or fragment is refused, a kept one is fine", () => {
     caught("Buy at https://tickets.example.com/Event?tier=VIP today.", "Buy at https://tickets.example.com/Event today.");
     caught("Buy at https://tickets.example.com/Event#Seats today.", "Buy at https://tickets.example.com/Event today.");

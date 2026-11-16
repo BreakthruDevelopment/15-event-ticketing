@@ -47,7 +47,7 @@ const stripNul = (s: string) => s.replace(/\0/g, "");
 
 const EMAIL = /[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi;
 const URL_SCHEME = /\b(?:https?:\/\/|www\.)[^\s<>"')\]]+/gi;
-const DOMAIN = /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b(?:\/[^\s<>"')\]]*)?/gi;
+const DOMAIN = /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b(?:[/?#][^\s<>"')\]]*)?/gi;
 const PHONE = /(?:\+?\d{1,3}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b|\b\d{3}[\s.-]\d{4}\b|\+\d[\d\s().-]{8,}\d/g;
 
 const trimTail = (s: string) => s.replace(/[.,;:!?)\]]+$/g, "");
