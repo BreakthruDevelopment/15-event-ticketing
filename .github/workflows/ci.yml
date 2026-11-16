@@ -54,6 +54,11 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      # Real Chromium + real Worker against the production build; see e2e/scanner.e2e.test.ts.
+      - name: Scanner browser tests
+        run: |
+          pnpm exec playwright-core install --with-deps chromium
+          pnpm test:e2e:scanner
       - name: Migrate
         run: pnpm db:migrate
       - name: Start the built app
