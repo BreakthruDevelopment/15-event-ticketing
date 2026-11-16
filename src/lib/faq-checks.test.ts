@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type SourceMap, canonLink, checkFaqAnswer, findLinksAndEmails, findPhones, numberTokens, quotedText } from "./faq-checks";
+import { type SourceMap, checkFaqAnswer, findLinksAndEmails, findPhones, numberTokens, quotedText } from "./faq-checks";
 
 const sources: SourceMap = new Map([
   ["E1", { id: "E1", kind: "event", label: "when", text: "When: starts Thursday, December 3, 2026 at 7:00 PM CST; ends Thursday, December 3, 2026 at 9:00 PM CST. Doors open Thursday, December 3, 2026 at 6:30 PM CST." }],
@@ -37,6 +37,14 @@ describe("links, emails and phones", () => {
     expect(f.emails).toEqual(["hello@example.org"]);
     expect(f.links).toEqual(["https://tickets.example.org/a", "www.site.com"]);
     expect(findLinksAndEmails("Go to https://Tickets.Example.org/EventPass.").links).toEqual(["https://Tickets.Example.org/EventPass"]);
+  });
+  it("a link token is captured whole: no character ends it early", () => {
+    for (const url of ["https://a.example.com/p~q:r=s&t+u?v#w\\x@y", "a.example.com\\x@y~z", "https://u@a.example.com/x", "www.a.example.com/%2f?q=1&r=2#f"]) {
+      expect(findLinksAndEmails(`See ${url}.`).links, url).toEqual([url]);
+      expect(findLinksAndEmails(`(${url})`).links, url).toEqual([url]);
+    }
+    expect(findLinksAndEmails("Write hello@example.org, or john.smith@example.org.").emails).toEqual(["hello@example.org", "john.smith@example.org"]);
+    expect(findLinksAndEmails("Write hello@example.org, or john.smith@example.org.").links).toEqual([]);
     expect(findPhones("Call (512) 555-0100 or 555-0199 or +1 512 555 0100.").length).toBe(3);
   });
 });
@@ -175,106 +183,78 @@ describe("time zones, ambiguous words and number words", () => {
   });
 });
 
-describe("links keep the case of path, query and fragment", () => {
-  const map: SourceMap = new Map([
-    ["F1", { id: "F1", kind: "faq", label: "Tickets", text: "Tickets\nBuy at https://tickets.example.com/EventPass and VIP at https://tickets.example.com/buy?tier=VIP#Seats or http://old.example.com/Plain or www.Shop.example.com/Go/ or see https://tickets.example.com/files/a%2Fb." }],
-    ["F2", { id: "F2", kind: "faq", label: "Bare", text: "Bare\nVisit bare.example.com/Path today." }],
-  ]);
-  const chk = (answer: string, id = "F1") => checkFaqAnswer({ status: "answered", answer, citations: [id] }, map);
-  const caught = (answer: string, id = "F1") => expect(chk(answer, id), answer).toMatchObject({ mode: "quoted", answer: null, flags: expect.arrayContaining(["unsupported_link"]) });
-  const fine = (answer: string, id = "F1") => expect(chk(answer, id).mode, answer).toBe("model");
-
-  it("catches a path whose case was changed (the exact case Codex reported)", () => {
-    caught("Buy at https://tickets.example.com/eventpass.");
-    caught("Buy at https://tickets.example.com/EVENTPASS.");
-    fine("Buy at https://tickets.example.com/EventPass.");
-  });
-  it("catches a changed query value or fragment", () => {
-    caught("VIP at https://tickets.example.com/buy?tier=vip#Seats.");
-    caught("VIP at https://tickets.example.com/buy?tier=VIP#seats.");
-    fine("VIP at https://tickets.example.com/buy?tier=VIP#Seats.");
-  });
-  it("matches the host case-insensitively", () => {
-    fine("Buy at https://TICKETS.Example.COM/EventPass.");
-    fine("Buy at HTTPS://tickets.example.com/EventPass.");
-    fine("Shop at www.shop.EXAMPLE.com/Go.");
-    fine("Shop at https://Bare.example.com/Path.", "F2");
-    caught("Shop at https://BARE.example.com/path.", "F2");
-  });
-  it("percent-encoding: hex digits are case-insensitive, the decoded value is not", () => {
-    fine("Files at https://tickets.example.com/files/a%2fb.");
-    caught("Files at https://tickets.example.com/files/a/b.");
-    caught("Files at https://tickets.example.com/files/A%2Fb.");
-  });
-  it("a trailing slash and a default port do not matter; another port does", () => {
-    fine("Buy at https://tickets.example.com/EventPass/.");
-    // (an answer that adds ":443" is still caught by the number check; the link form itself ignores a default port)
-    expect(canonLink("https://tickets.example.com:443/EventPass").key).toBe(canonLink("https://tickets.example.com/EventPass").key);
-    expect(canonLink("https://tickets.example.com:8443/EventPass").key).not.toBe(canonLink("https://tickets.example.com/EventPass").key);
-    caught("Buy at https://tickets.example.com:8443/EventPass.");
-    fine("Shop at https://shop.example.com/Go.");
-    caught("Shop at https://shop.example.com/Go/x.");
-  });
-  it("the scheme may be left out but not changed: http never stands in for https", () => {
-    fine("Buy at tickets.example.com/EventPass.");
-    caught("Buy at http://tickets.example.com/EventPass.");
-    fine("Old shop at http://old.example.com/Plain.");
-    caught("Old shop at https://old.example.com/plain.");
-    fine("Visit https://bare.example.com/Path.", "F2");
-    caught("Visit http://bare.example.com/Path.", "F2");
-  });
-  it("a different host or a longer path is still unsupported", () => {
-    caught("Buy at https://tickets.example.org/EventPass.");
-    caught("Buy at https://tickets.example.com/EventPass/extra.");
-  });
-});
-
-describe("a link may not be redirected with a backslash, or cut short", () => {
+describe("links: an answer link must equal a source link", () => {
   const mk = (text: string): SourceMap => new Map([["F1", { id: "F1", kind: "faq", label: "Links", text: `Links\n${text}` }]]);
   const run = (source: string, answer: string) => checkFaqAnswer({ status: "answered", answer, citations: ["F1"] }, mk(source));
   const caught = (source: string, answer: string) => expect(run(source, answer), answer).toMatchObject({ mode: "quoted", answer: null, flags: expect.arrayContaining(["unsupported_link"]) });
-  const fine = (source: string, answer: string) => expect(run(source, answer).mode, answer).toBe("model");
+  const fine = (source: string, answer: string) => expect(run(source, answer), answer).toMatchObject({ mode: "model", flags: [] });
+  const SRC = "Buy at https://tickets.example.com/EventPass today.";
 
-  it("a backslash after the host is refused (browsers read it as a path separator)", () => {
-    caught("Buy at https://tickets.example.com/EventPass today.", "Buy at https://tickets.example.com\\@evil.test/EventPass today.");
-    caught("Buy at tickets.example.com today.", "Buy at https://tickets.example.com\\..\\admin today.");
-    caught("Buy at https://tickets.example.com/EventPass today.", "Buy at https://tickets.example.com\\EventPass today.");
+  it("a link echoed exactly passes; so does the same link without its scheme", () => {
+    fine(SRC, "Buy at https://tickets.example.com/EventPass today.");
+    fine(SRC, "Buy at tickets.example.com/EventPass today.");
+    fine("Buy at tickets.example.com/EventPass today.", "Buy at tickets.example.com/EventPass today.");
   });
-  it("a scheme-less link with a backslash is refused too", () => {
+  it("scheme and host are case-insensitive; one trailing slash and trailing sentence punctuation do not matter", () => {
+    fine(SRC, "Buy at HTTPS://TICKETS.Example.COM/EventPass today.");
+    fine(SRC, "Buy at https://tickets.example.com/EventPass/ today.");
+    fine("Buy at https://tickets.example.com/EventPass/ today.", "Buy at https://tickets.example.com/EventPass today.");
+    fine(SRC, "Buy at https://tickets.example.com/EventPass.");
+    fine(SRC, "Buy (https://tickets.example.com/EventPass), or later.");
+    fine(SRC, "Is it https://tickets.example.com/EventPass?");
+  });
+  it("a changed path, query or fragment is refused (case included)", () => {
+    caught(SRC, "Buy at https://tickets.example.com/eventpass today.");
+    caught(SRC, "Buy at https://tickets.example.com/EventPass/extra today.");
+    caught("Buy at https://tickets.example.com/buy?tier=VIP#Seats today.", "Buy at https://tickets.example.com/buy?tier=vip#Seats today.");
+    caught("Buy at https://tickets.example.com/buy?tier=VIP#Seats today.", "Buy at https://tickets.example.com/buy?tier=VIP#seats today.");
+    caught("Buy at https://tickets.example.com/?tier=VIP today.", "Buy at tickets.example.com?tier=General today.");
+    caught("Buy at https://tickets.example.com/#Seats today.", "Buy at tickets.example.com#Other today.");
+    caught("Buy at https://tickets.example.com/Event?tier=VIP today.", "Buy at https://tickets.example.com/Event today.");
+    caught("Buy at https://tickets.example.com/Event#Seats today.", "Buy at https://tickets.example.com/Event today.");
+  });
+  it("nothing is repaired into equality: percent-case, default port, www, decoding", () => {
+    caught("Files at https://tickets.example.com/files/a%2Fb today.", "Files at https://tickets.example.com/files/a%2fb today.");
+    caught("Files at https://tickets.example.com/files/a%2Fb today.", "Files at https://tickets.example.com/files/a/b today.");
+    caught(SRC, "Buy at https://tickets.example.com:443/EventPass today.");
+    caught(SRC, "Buy at https://www.tickets.example.com/EventPass today.");
+    caught(SRC, "Buy at www.tickets.example.com/EventPass today.");
+    caught("Buy at https://www.tickets.example.com/EventPass today.", "Buy at https://tickets.example.com/EventPass today.");
+  });
+  it("http never stands in for https; a stated scheme must be the source's", () => {
+    caught(SRC, "Buy at http://tickets.example.com/EventPass today.");
+    caught("Buy at http://old.example.com/Plain today.", "Buy at https://old.example.com/Plain today.");
+    fine("Buy at http://old.example.com/Plain today.", "Buy at http://old.example.com/Plain today.");
+    caught("Buy at tickets.example.com/EventPass today.", "Buy at https://tickets.example.com/EventPass today.");
+  });
+  it("a different host is refused", () => {
+    caught(SRC, "Buy at https://tickets.example.org/EventPass today.");
+    caught(SRC, "Buy at https://evil.test/EventPass today.");
+  });
+
+  it("a backslash redirect is not equal to anything (browsers read \\ as /)", () => {
+    caught(SRC, "Buy at https://tickets.example.com\\@evil.test/EventPass today.");
+    caught("Buy at tickets.example.com today.", "Buy at https://tickets.example.com\\..\\admin today.");
+    caught(SRC, "Buy at https://tickets.example.com\\EventPass today.");
     caught("Buy at tickets.example.com today.", "Buy at tickets.example.com\\refund-form today.");
     caught("Buy at tickets.example.com/EventPass today.", "Buy at www.tickets.example.com\\EventPass today.");
   });
-  it("credentials in front of the host are refused", () => {
-    // the finder reads "evil.test@tickets.example.com" as an email, so it is refused as one; either way it is quoted away
-    for (const answer of ["Buy at https://evil.test@tickets.example.com/EventPass today.", "Buy at https://evil@tickets.example.com/EventPass today."]) {
-      expect(run("Buy at https://tickets.example.com/EventPass today.", answer), answer).toMatchObject({ mode: "quoted", answer: null });
-    }
-    expect(canonLink("https://evil@tickets.example.com/EventPass").key).not.toBe(canonLink("https://tickets.example.com/EventPass").key);
-  });
-  it("canonLink reads a backslash as the slash a browser reads", () => {
-    expect(canonLink("https://tickets.example.com\\admin").key).toBe(canonLink("https://tickets.example.com/admin").key);
+  it("credentials before the host are not equal to the source link, even next to a source email (the shipped fixture's shape)", () => {
+    caught(SRC, "Buy at https://evil.test@tickets.example.com/EventPass today.");
+    caught("Email hello@austinproductmeetup.example.", "Refunds at https://hello@austinproductmeetup.example/refund-form today.");
+    fine("Email hello@austinproductmeetup.example.", "Email hello@austinproductmeetup.example.");
   });
   it("a prefix of a longer link never stands in for it, whatever character the cut lands on", () => {
-    for (const sep of ["~", ":", "=", "&", "+"]) {
+    for (const sep of ["~", ":", "=", "&", "+", "@", "?", "#", "\\"]) {
       const full = `https://tickets.example.com/Event${sep}Pass`;
       caught(`Buy at ${full} today.`, "Buy at https://tickets.example.com/Event today.");
       caught(`Buy at ${full} today.`, "Buy at tickets.example.com/Event today.");
       fine(`Buy at ${full} today.`, `Buy at ${full} today.`);
     }
   });
-  it("a bare domain with a query or fragment but no path is compared in full", () => {
-    caught("Buy at https://tickets.example.com/?tier=VIP today.", "Buy at tickets.example.com?tier=General today.");
-    caught("Buy at https://tickets.example.com/?tier=VIP today.", "Buy at tickets.example.com/?tier=General today.");
-    caught("Buy at https://tickets.example.com/#Seats today.", "Buy at tickets.example.com#Other today.");
-    caught("Buy at tickets.example.com?tier=VIP today.", "Buy at tickets.example.com today.");
-    fine("Buy at https://tickets.example.com/?tier=VIP today.", "Buy at tickets.example.com?tier=VIP today.");
-    fine("Buy at tickets.example.com?tier=VIP today.", "Buy at https://tickets.example.com/?tier=VIP today.");
-    expect(findLinksAndEmails("Go to tickets.example.com?tier=VIP.").links).toEqual(["tickets.example.com?tier=VIP"]);
-  });
-  it("a dropped query or fragment is refused, a kept one is fine", () => {
-    caught("Buy at https://tickets.example.com/Event?tier=VIP today.", "Buy at https://tickets.example.com/Event today.");
-    caught("Buy at https://tickets.example.com/Event#Seats today.", "Buy at https://tickets.example.com/Event today.");
-    caught("Buy at tickets.example.com/Event?tier=VIP today.", "Buy at tickets.example.com/Event today.");
-    fine("Buy at https://tickets.example.com/Event?tier=VIP today.", "Buy at https://tickets.example.com/Event?tier=VIP today.");
+  it("an answer echoing a Windows path is not a link problem", () => {
+    const r = run("Run C:\\Program Files\\setup.exe to install.", "Run C:\\Program Files\\setup.exe to install.");
+    expect(r.flags).not.toContain("unsupported_link");
+    expect(r.mode).toBe("model");
   });
 });

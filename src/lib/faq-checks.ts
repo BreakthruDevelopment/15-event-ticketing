@@ -46,95 +46,69 @@ const stripNul = (s: string) => s.replace(/\0/g, "");
 // Links, emails, phone numbers
 
 const EMAIL = /[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi;
-const URL_SCHEME = /\b(?:https?:\/\/|www\.)[^\s<>"')\]]+/gi;
-const DOMAIN = /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b(?:[/?#][^\s<>"')\]]*)?/gi;
+const EMAIL_WHOLE = /^[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
+const LINK_START = /\b(?:https?:\/\/|www\.)\S*/i;
+const DOMAIN_START = /^(?:[a-z0-9-]+\.)+[a-z]{2,}(?![a-z0-9-])/i;
 const PHONE = /(?:\+?\d{1,3}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b|\b\d{3}[\s.-]\d{4}\b|\+\d[\d\s().-]{8,}\d/g;
 
-const trimTail = (s: string) => s.replace(/[.,;:!?)\]]+$/g, "");
+/** Strip sentence punctuation from the end of a token: . , ; : ! ? quotes, ">" and an unbalanced ")" or "]". */
+function trimTail(t: string): string {
+  for (;;) {
+    const c = t[t.length - 1];
+    const unbalanced = (open: string, close: string) => c === close && t.split(close).length > t.split(open).length;
+    if (c && (".,;:!?'\">".includes(c) || unbalanced("(", ")") || unbalanced("[", "]"))) t = t.slice(0, -1);
+    else return t;
+  }
+}
 
 /**
- * Emails first, then links (scheme or bare domain) that aren't part of an email. Emails are lower-cased; links keep their
- * case (a path or query is case-sensitive: see `canonLink`). Tail punctuation removed from both.
+ * Links and emails in `input`. Links first, then emails in what is left.
+ *
+ * THE PROPERTY THAT MATTERS: a link is a MAXIMAL run of non-whitespace characters, from its "http(s)://", "www." or
+ * bare-domain start to the next whitespace, minus trailing sentence punctuation. No character class ends a token early,
+ * so a prefix of a link can never be checked in place of the whole link (that was the shape of every grounding bypass:
+ * "\", "~", ":", "=", "&", "+", "?", "#", "@" each cut the token short and the rest went unchecked).
+ * Emails are lower-cased; links are returned exactly as written.
  */
-export function findLinksAndEmails(input: string): { emails: string[]; links: string[]; rest: string } {
-  const emails = (input.match(EMAIL) ?? []).map((m) => trimTail(m.toLowerCase()));
-  let rest = input.replace(EMAIL, " ");
-  const links = [...(rest.match(URL_SCHEME) ?? [])];
-  rest = rest.replace(URL_SCHEME, " ");
-  links.push(...(rest.match(DOMAIN) ?? []));
-  rest = rest.replace(DOMAIN, " ");
-  return { emails, links: links.map(trimTail), rest };
+export function findLinksAndEmails(input: string): { emails: string[]; links: string[] } {
+  const emails: string[] = [];
+  const links: string[] = [];
+  for (const raw of input.split(/\s+/)) {
+    const withScheme = LINK_START.exec(raw);
+    if (withScheme) {
+      links.push(trimTail(raw.slice(withScheme.index)));
+      continue;
+    }
+    const token = trimTail(raw.replace(/^[(["'<]+/, ""));
+    if (EMAIL_WHOLE.test(token)) emails.push(token.toLowerCase());
+    else if (DOMAIN_START.test(token)) links.push(token);
+    else for (const m of raw.match(EMAIL) ?? []) emails.push(trimTail(m.toLowerCase()));
+  }
+  return { emails, links };
 }
 
 export function findPhones(input: string): string[] {
   return (input.match(PHONE) ?? []).map((m) => m.replace(/\D/g, "")).filter((d) => d.length >= 7);
 }
 
-// Anything that can continue a link: a prefix that ends before one of these is not the whole link ("/Event" is not "/Event~Pass",
-// nor "/Event?tier=VIP").
-const isTokenChar = (c: string | undefined) => !!c && /[a-z0-9_\-/%@~:=&+?#]/i.test(c);
-
-/** `needle` occurs in `haystack` as a whole link or email: not as the start or middle of a longer one. Case-sensitive. */
-function containsWhole(haystack: string, needle: string): boolean {
-  if (!needle) return true;
-  let from = 0;
-  for (;;) {
-    const i = haystack.indexOf(needle, from);
-    if (i < 0) return false;
-    const before = haystack[i - 1];
-    const after = haystack[i + needle.length];
-    const afterDot = after === "." && /[a-z0-9]/i.test(haystack[i + needle.length + 1] ?? "");
-    if (!isTokenChar(before) && before !== "." && !isTokenChar(after) && !afterDot) return true;
-    from = i + 1;
-  }
-}
-
 /**
- * A link in comparable form. Only what is case-insensitive is normalised: the host (lower-cased, IDN to punycode, a
- * leading "www." and a default port dropped) and the hex digits of percent-encoding (%2f is %2F, but is NOT "/"; nothing is
- * decoded). The path, query and fragment keep their case: "/EventPass" and "/eventpass" are different pages. A trailing
- * slash on the path is ignored, as before. The scheme is kept apart: an answer may omit it, but may not change it (see
- * `linkMatches`).
+ * An answer link must EQUAL a source link, byte for byte, after only these: the scheme and host are lower-cased; the
+ * answer may leave the scheme out (but never states a different one: "http://" is not "https://"); one trailing "/" more
+ * or less. Nothing is repaired into equality: no decoding, no case folding of path/query, no "www." added or dropped, no
+ * default ports. The model is repeating links from sources we gave it, so it has no reason to vary one; a false alarm
+ * only degrades to the quoted source (which prints the real link), a miss serves a bad link to everyone for 24 h.
  */
-export function canonLink(rawLink: string): { scheme: "http" | "https" | ""; key: string } {
-  // Browsers read "\" as "/" in http(s) links (WHATWG URL), so "host\\@evil/x" goes to host/@evil/x, not to host.
-  const link = rawLink.replace(/\\/g, "/");
+export function parseLink(link: string): { scheme: "http" | "https" | ""; key: string } {
   const m = /^(https?):\/\//i.exec(link);
-  const scheme = (m ? m[1].toLowerCase() : "") as "http" | "https" | "";
   const rest = link.slice(m ? m[0].length : 0);
   const cut = rest.search(/[/?#]/);
-  let host = cut < 0 ? rest : rest.slice(0, cut);
-  let tail = cut < 0 ? "" : rest.slice(cut);
-  if (host.includes("@")) return { scheme, key: `userinfo:${host}${tail}` }; // "user@host" hides the real host: never equals a source link
-  try {
-    host = new URL(`http://${host}`).host; // lower-cased, punycode, default port of http dropped
-  } catch {
-    host = host.toLowerCase();
-  }
-  host = host.replace(/^www\./, "").replace(/:(?:80|443)$/, "");
-  tail = tail.replace(/%[0-9a-f]{2}/gi, (e) => e.toUpperCase());
-  const path = /^[^?#]*/.exec(tail)?.[0] ?? "";
-  tail = path.replace(/\/+$/, "") + tail.slice(path.length);
-  return { scheme, key: host + tail };
+  const host = (cut < 0 ? rest : rest.slice(0, cut)).toLowerCase();
+  const tail = cut < 0 ? "" : rest.slice(cut);
+  return { scheme: (m ? m[1].toLowerCase() : "") as "http" | "https" | "", key: (host + tail).replace(/\/$/, "") };
 }
 
-/**
- * The answer's link `a` is one the sources contain: same host, path, query and fragment (host case-insensitive, the rest
- * exact). A scheme the answer states must be the source's: "http://" never passes for an "https://" link, and a source
- * that gave no scheme supports only an https (or no) scheme.
- */
-function linkMatches(a: ReturnType<typeof canonLink>, s: ReturnType<typeof canonLink>): boolean {
-  if (a.key !== s.key) return false;
-  if (!a.scheme) return true;
-  return s.scheme ? a.scheme === s.scheme : a.scheme === "https";
-}
-
-/** `text` with every link in it replaced by its canonical key, so a whole-link search can run case-sensitively. */
-function canonText(text: string): string {
-  const { links } = findLinksAndEmails(text);
-  let out = text;
-  for (const l of links) out = out.split(l).join(canonLink(l).key);
-  return out;
+function linkMatches(a: ReturnType<typeof parseLink>, s: ReturnType<typeof parseLink>): boolean {
+  return a.key === s.key && (!a.scheme || a.scheme === s.scheme);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -270,21 +244,12 @@ export function numberTokens(input: string, ignore: Set<string> = new Set()): Se
 /** Why `answer` is not supported by `sourceText` (the cited sources joined), or an empty list when it is. */
 export function unsupportedParts(answer: string, sourceText: string, citedIds: string[]): string[] {
   const flags: string[] = [];
-  const src = canonText(sourceText);
 
   const a = findLinksAndEmails(answer);
   const s = findLinksAndEmails(sourceText);
   if (a.emails.some((e) => !s.emails.some((x) => x === e))) flags.push("unsupported_email");
-  const srcLinks = s.links.map(canonLink);
-  const linkOk = (l: string) => {
-    const c = canonLink(l);
-    if (srcLinks.some((x) => linkMatches(c, x))) return true;
-    // Fallback for a link the sources contain but the finder read differently: never for an explicit http:// link.
-    return c.scheme !== "http" && containsWhole(src, c.key);
-  };
-  // A link with a backslash is refused outright: no real FAQ link has one, and finders stop at it, so what follows would go unchecked.
-  const backslashLink = answer.split(/\s+/).some((t) => t.includes("\\") && (new RegExp(URL_SCHEME.source, "i").test(t) || new RegExp(DOMAIN.source, "i").test(t)));
-  if (backslashLink || a.links.some((l) => !linkOk(l))) flags.push("unsupported_link");
+  const srcLinks = s.links.map(parseLink);
+  if (a.links.some((l) => !srcLinks.some((x) => linkMatches(parseLink(l), x)))) flags.push("unsupported_link");
 
   const srcPhones = findPhones(sourceText);
   if (findPhones(answer).some((d) => !srcPhones.some((p) => p.endsWith(d) || d.endsWith(p)))) flags.push("unsupported_phone");
