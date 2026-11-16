@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startCamera } from "./camera";
 import { createScanDedupe } from "./dedupe";
+import { truncateRaw } from "./manual";
 import { processDecodedRawText, startFrameLoop, type WorkerLike } from "./frame-loop";
 import { createScannerController, type ScannerControllerOptions } from "./use-scanner";
 
@@ -210,10 +211,12 @@ describe("controller: overlapping start() calls (B1)", () => {
       createWorker: () => ({ onmessage: null, postMessage: () => {}, terminate: () => {} }),
       cameraOptions: { mediaDevices: { getUserMedia }, document: null, window: null },
     });
-    const video = { readyState: 4 } as HTMLVideoElement;
+    // Both calls share one element, as the door page's single <video> does.
+    const video = { readyState: 4, srcObject: null as unknown, play: async () => {}, pause: () => {} } as unknown as HTMLVideoElement;
+    const streamB = fakeStream(trackB);
     const first = ctrl.start(video); // a double-tap on "Start scanning"
     const second = ctrl.start(video);
-    resolveB(fakeStream(trackB)); // the second request's camera arrives first
+    resolveB(streamB); // the second request's camera arrives first
     const secondStarted = await second;
     resolveA(fakeStream(trackA));
     const firstStarted = await first;
@@ -222,9 +225,12 @@ describe("controller: overlapping start() calls (B1)", () => {
     expect(trackA.stop).toHaveBeenCalled(); // the superseded stream is released
     expect(ctrl.getState().status).toBe("scanning"); // and did not take the live session down with it
     expect(trackB.stop).not.toHaveBeenCalled();
+    // What the staffer sees: the preview shows the live session's stream, not nothing (review 5924084602, B3).
+    expect(video.srcObject).toBe(streamB);
     ctrl.stop("manual");
     expect(trackB.stop).toHaveBeenCalled(); // an explicit stop reaches the live camera
     expect(ctrl.getState().status).toBe("idle");
+    expect(video.srcObject).toBeNull(); // and the preview is released with it
   });
 });
 
@@ -275,8 +281,8 @@ describe("onInvalidQr never hands out an unbounded raw string", () => {
     const { ctrl } = controllerWith({ onInvalidQr: (raw) => void seen.push(raw) });
     await ctrl.submitManual(`http://x\nFORGED LOG LINE: ${"x".repeat(5_000)}`);
     expect(seen).toHaveLength(1);
-    expect(seen[0].length).toBeLessThanOrEqual(65);
-    expect(seen[0]).not.toMatch(/[\u0000-\u001f]/);
+    expect(Array.from(seen[0]).length).toBeLessThanOrEqual(65);
+    expect(seen[0]).not.toMatch(/[\u0000-\u001f\u0080-\u009f\u2028\u2029]/);
     const camera: string[] = [];
     processDecodedRawText(`WIFI:S:${"y".repeat(5_000)}`, {
       dedupe: createScanDedupe(),
@@ -285,6 +291,14 @@ describe("onInvalidQr never hands out an unbounded raw string", () => {
       onInvalidQr: (raw) => void camera.push(raw),
     });
     expect(camera).toHaveLength(1);
-    expect(camera[0].length).toBeLessThanOrEqual(65);
+    expect(Array.from(camera[0]).length).toBeLessThanOrEqual(65);
+  });
+
+  it("never cuts a surrogate pair in half, and scrubs C1 controls and line separators", () => {
+    const cut = truncateRaw(`${"a".repeat(63)}\u{1F600}tail:`);
+    expect(cut.isWellFormed()).toBe(true);
+    expect(cut.startsWith("a".repeat(63))).toBe(true);
+    const scrubbed = truncateRaw("x\u0085y\u2028z\u2029w\u007f");
+    expect(scrubbed).toBe("x?y?z?w?");
   });
 });

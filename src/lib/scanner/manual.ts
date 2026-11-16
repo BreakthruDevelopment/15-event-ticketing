@@ -33,11 +33,14 @@ export const MAX_REPORTED_RAW_CHARS = 64;
 
 /**
  * Bounds a raw scanned or typed string before it leaves this module (an `onInvalidQr` consumer may log it): control
- * characters become `?` so it cannot forge a log line, and the length is capped.
+ * characters become `?` so it cannot forge a log line, and the length is capped at 64 code points.
  */
 export function truncateRaw(raw: string): string {
-  const clean = raw.replace(/[\u0000-\u001f\u007f]/g, "?");
-  return clean.length > MAX_REPORTED_RAW_CHARS ? `${clean.slice(0, MAX_REPORTED_RAW_CHARS)}\u2026` : clean;
+  // C0 and C1 controls, DEL, and the Unicode line/paragraph separators all become `?`.
+  const clean = raw.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, "?");
+  // Cut on code points, never inside a surrogate pair (a lone surrogate is invalid UTF-8 if it is ever stored).
+  const points = Array.from(clean);
+  return points.length > MAX_REPORTED_RAW_CHARS ? `${points.slice(0, MAX_REPORTED_RAW_CHARS).join("")}\u2026` : clean;
 }
 
 /** Strict check for a 60-character `ET1:` Crockford base32 ticket QR token. */

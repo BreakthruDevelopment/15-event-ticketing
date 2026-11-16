@@ -58,12 +58,14 @@ async function iphone(): Promise<{ context: BrowserContext; page: Page; workers:
   return { context, page, workers, pageErrors };
 }
 
-async function tracksEnded(page: Page): Promise<{ streams: number; live: number }> {
+async function tracksEnded(page: Page): Promise<{ streams: number; live: number; previewAttached: boolean }> {
   return page.evaluate(() => {
     const streams = window.__selfTest!.streams;
+    const video = document.querySelector<HTMLVideoElement>('[data-testid="video"]')!;
     return {
       streams: streams.length,
       live: streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === "live").length,
+      previewAttached: video.srcObject !== null,
     };
   });
 }
@@ -139,6 +141,7 @@ describe("finding 2: a dropped worker reply does not wedge the loop", () => {
     await context.close();
     expect(stopped).toBeTruthy();
     expect(live.live).toBe(0);
+    expect(live.previewAttached).toBe(false);
     expect(l.workerTerminated).toBe(true);
     expect(text).toMatch(/manual/i);
   });
@@ -154,6 +157,7 @@ describe("finding 3: the camera stream does not outlive a failed start", () => {
     expect(r.started).toBe(false);
     expect(live.streams).toBeGreaterThan(0);
     expect(live.live).toBe(0);
+    expect(live.previewAttached).toBe(false);
     expect(text).not.toMatch(/could not start the camera/i);
     expect(text).toMatch(/scanner|decoder/i);
   });
@@ -172,6 +176,7 @@ describe("finding 4: a null 2d context fails visibly", () => {
     expect(s).toBe("error");
     expect(text).toMatch(/scanner|decoder/i);
     expect(live.live).toBe(0);
+    expect(live.previewAttached).toBe(false);
     expect(l.workerTerminated).toBe(true);
   });
 });
@@ -206,20 +211,44 @@ describe("finding 5: a failing check-in request is not silent, and the retry is 
   });
 });
 
-describe("overlapping start() calls (review 5923731525, B1)", () => {
-  it("a double-tap whose second camera arrives first leaves no track live after stop()", async () => {
+describe("overlapping start() calls (review 5923731525 B1, review 5924084602 B3)", () => {
+  it("a double-tap whose second camera arrives first leaves a working preview that decodes, and no track live after stop()", async () => {
     const { page, context } = await iphone();
     // The first request's camera is held back 600 ms, so the second request's camera arrives first.
     const r = await page.evaluate((s) => window.__selfTest!.startTwice(s), { gumDelays: [600, 0] });
-    const mid = await status(page);
-    await page.evaluate(() => window.__selfTest!.controller()!.stop("manual"));
-    const live = await tracksEnded(page);
-    await context.close();
     expect(r.second).toBe(true);
     expect(r.first).toBe(false);
-    expect(mid).toBe("scanning");
-    expect(live.streams).toBe(2);
-    expect(live.live).toBe(0);
+    expect(await status(page)).toBe("scanning");
+    // What a staffer needs, not just what we thought to name: the preview shows the owning session's stream, it is
+    // playing real frames, exactly one track is live, and a QR in front of the camera actually decodes.
+    const preview = await page.evaluate(() => {
+      const video = document.querySelector<HTMLVideoElement>('[data-testid="video"]')!;
+      const streams = window.__selfTest!.streams;
+      const liveStreams = streams.filter((s) => s.getTracks().some((t) => t.readyState === "live"));
+      return {
+        liveStreams: liveStreams.length,
+        videoHoldsLiveStream: liveStreams.length === 1 && video.srcObject === liveStreams[0],
+      };
+    });
+    expect(preview.liveStreams).toBe(1);
+    expect(preview.videoHoldsLiveStream).toBe(true);
+    const playing = await until(
+      () => page.evaluate(() => {
+        const v = document.querySelector<HTMLVideoElement>('[data-testid="video"]')!;
+        return !v.paused && v.readyState >= 2 && v.videoWidth > 0;
+      }),
+      5_000,
+    );
+    expect(playing, "the preview never started playing frames").toBeTruthy();
+    const decoded = await until(async () => (await log(page)).scanAttempts.length > 0, 10_000);
+    expect(decoded, "nothing decoded after the overlapping starts").toBeTruthy();
+    expect((await log(page)).scanTokens[0]).toBe(TOKEN);
+    await page.evaluate(() => window.__selfTest!.controller()!.stop("manual"));
+    const after = await tracksEnded(page);
+    await context.close();
+    expect(after.streams).toBe(2);
+    expect(after.live).toBe(0);
+    expect(after.previewAttached).toBe(false);
   });
 });
 

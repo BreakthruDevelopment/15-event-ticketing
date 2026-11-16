@@ -295,8 +295,11 @@ export async function startCamera(options: StartCameraOptions = {}): Promise<Cam
 
     if (video) {
       try {
-        if (typeof video.pause === "function") video.pause();
-        video.srcObject = null;
+        // Only release the preview if it still shows OUR stream; another session may have taken the element.
+        if (video.srcObject === stream) {
+          if (typeof video.pause === "function") video.pause();
+          video.srcObject = null;
+        }
       } catch {
         // Ignore DOM cleanup errors.
       }

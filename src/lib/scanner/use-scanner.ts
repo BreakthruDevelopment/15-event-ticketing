@@ -5,6 +5,7 @@ import {
   type CameraErrorInfo,
   type CameraSession,
   type CameraStopReason,
+  configureVideoElement,
   describeCameraError,
   describeDecoderError,
   type StartCameraOptions,
@@ -311,13 +312,30 @@ export function createScannerController(
 
     let session: CameraSession;
     let mine: CameraSession | null = null;
+    // The preview is attached here, by the owning session only, never inside `startCamera`: overlapping starts share
+    // one <video>, and a session that loses the race must not be able to overwrite or clear what the winner shows.
+    let attached: { video: HTMLVideoElement; stream: MediaStream } | null = null;
+    const detachPreview = () => {
+      const a = attached;
+      attached = null;
+      if (!a) return;
+      try {
+        if (a.video.srcObject === a.stream) {
+          if (typeof a.video.pause === "function") a.video.pause();
+          a.video.srcObject = null;
+        }
+      } catch {
+        // Ignore DOM cleanup errors.
+      }
+    };
     try {
       session = await startCamera({
         ...options.cameraOptions,
-        video: (activeVideo as HTMLVideoElement | null) ?? null,
+        video: null,
         onStop: (reason) => {
           // Before `startCamera` returns we do not hold the session yet: fall back to the start generation.
           if (mine === null ? gen !== startGeneration : ownerSession !== mine) return;
+          detachPreview();
           if (frameLoop) {
             frameLoop.stop();
             frameLoop = null;
@@ -357,6 +375,43 @@ export function createScannerController(
       return false;
     }
     cameraSession = session;
+
+    const previewVideo = (activeVideo as HTMLVideoElement | null) ?? null;
+    if (previewVideo) {
+      try {
+        configureVideoElement(previewVideo, session.stream);
+        attached = { video: previewVideo, stream: session.stream };
+        if (typeof previewVideo.play === "function") {
+          try {
+            await previewVideo.play();
+          } catch {
+            // Autoplay failure on a backgrounded element is non-fatal while the tracks are live.
+          }
+        }
+      } catch (err) {
+        // The camera is live but cannot be shown: release it and say so.
+        if (gen === startGeneration) {
+          startGeneration++;
+          cameraSession = null;
+          session.stop("manual");
+          updateState({
+            status: "error",
+            scanning: false,
+            torchSupported: false,
+            torchEnabled: false,
+            cameraError: describeCameraError(err, options.userAgent),
+          });
+        } else {
+          session.stop("manual");
+        }
+        return false;
+      }
+      if (gen !== startGeneration || session.isStopped()) {
+        // stop() or a newer start() ran while the video was starting; they own the cleanup of what they stopped.
+        session.stop("manual");
+        return false;
+      }
+    }
 
     // From here the camera is live: every way out below must stop it.
     let loop: FrameLoopHandle;

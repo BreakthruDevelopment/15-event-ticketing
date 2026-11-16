@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 const NO_APP_LIMIT: Record<string, string> = {
   "api/auth/[...all]/route.ts": "Better Auth applies its own per-IP limits to sign-in and sign-up",
   "api/health/route.ts": "health check called by every cloud's probe; must not be refused",
+  "door/scanner-selftest/page.tsx": "404s unless SCANNER_SELFTEST=1; never set in a deploy",
   "page.tsx": "static marketing page, no data",
   "sign-in/page.tsx": "static form, no data",
 };
