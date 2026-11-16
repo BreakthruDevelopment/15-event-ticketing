@@ -49,6 +49,7 @@ const EMAIL = /[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi;
 const EMAIL_WHOLE = /^[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
 const LINK_START = /\b(?:https?:\/\/|www\.)\S*/i;
 const DOMAIN_START = /^(?:[a-z0-9-]+\.)+[a-z]{2,}(?![a-z0-9-])/i;
+const DOMAIN_ANY = /(?:[a-z0-9-]+\.)+[a-z]{2,}(?![a-z0-9-])/i;
 const PHONE = /(?:\+?\d{1,3}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b|\b\d{3}[\s.-]\d{4}\b|\+\d[\d\s().-]{8,}\d/g;
 
 /** Strip sentence punctuation from the end of a token: . , ; : ! ? quotes, ">" and an unbalanced ")" or "]". */
@@ -64,10 +65,14 @@ function trimTail(t: string): string {
 /**
  * Links and emails in `input`. Links first, then emails in what is left.
  *
- * THE PROPERTY THAT MATTERS: a link is a MAXIMAL run of non-whitespace characters, from its "http(s)://", "www." or
- * bare-domain start to the next whitespace, minus trailing sentence punctuation. No character class ends a token early,
- * so a prefix of a link can never be checked in place of the whole link (that was the shape of every grounding bypass:
- * "\", "~", ":", "=", "&", "+", "?", "#", "@" each cut the token short and the rest went unchecked).
+ * TWO PROPERTIES THAT MATTER, and both must hold:
+ *  1. A link is a MAXIMAL run of non-whitespace characters, from its "http(s)://", "www." or bare-domain start to the next
+ *     whitespace, minus trailing sentence punctuation. No character class ends a token early, so a prefix of a link can
+ *     never be checked in place of the whole link ("\", "~", ":", "=", "&", "+", "?", "#", "@" each used to cut the token
+ *     short and the rest went unchecked).
+ *  2. A domain ANYWHERE inside a whitespace token is found, not only at its start ("see:evil.test/x", "a—evil.test/x",
+ *     "hello@known.example@evil.test"): what follows the match is the maximal suffix. A token that merely contains a
+ *     link must never fall through unchecked.
  * Emails are lower-cased; links are returned exactly as written.
  */
 export function findLinksAndEmails(input: string): { emails: string[]; links: string[] } {
@@ -82,7 +87,14 @@ export function findLinksAndEmails(input: string): { emails: string[]; links: st
     const token = trimTail(raw.replace(/^[(["'<]+/, ""));
     if (EMAIL_WHOLE.test(token)) emails.push(token.toLowerCase());
     else if (DOMAIN_START.test(token)) links.push(token);
-    else for (const m of raw.match(EMAIL) ?? []) emails.push(trimTail(m.toLowerCase()));
+    else {
+      const found = raw.match(EMAIL) ?? [];
+      for (const m of found) emails.push(trimTail(m.toLowerCase()));
+      let left = raw;
+      for (const m of found) left = left.replace(m, "\0");
+      const d = DOMAIN_ANY.exec(left);
+      if (d) links.push(trimTail(left.slice(d.index).replace(/\0/g, "")));
+    }
   }
   return { emails, links };
 }

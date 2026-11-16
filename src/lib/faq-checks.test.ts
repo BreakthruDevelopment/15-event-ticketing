@@ -267,6 +267,35 @@ describe("links: an answer link must equal a source link", () => {
       fine(`Buy at ${full} today.`, `Buy at ${full} today.`);
     }
   });
+  it("a domain anywhere inside a whitespace token is found, not only at its start", () => {
+    for (const [src, tok] of [
+      ["refunds:evil.test/claim-your-money", "evil.test/claim-your-money"],
+      ["Tickets:evil.test/EventPass", "evil.test/EventPass"],
+      ["tickets\u2014evil.test/EventPass", "evil.test/EventPass"],
+      ["see/evil.test/EventPass", "evil.test/EventPass"],
+      ["see(evil.test/EventPass", "evil.test/EventPass"],
+      ["xhttps://evil.test/EventPass", "evil.test/EventPass"],
+    ] as const) {
+      expect(findLinksAndEmails(`Go ${src}.`).links, src).toEqual([tok]);
+    }
+    const dbl = findLinksAndEmails("Write hello@known.example@evil.test now");
+    expect(dbl.emails).toEqual(["hello@known.example"]);
+    expect(dbl.links).toEqual(["evil.test"]);
+  });
+  it("a domain hidden inside a token is refused as an ungrounded link (seven bypasses of 86a39b1)", () => {
+    const FX = "Refunds\nEmail hello@austinproductmeetup.example.";
+    caught(FX, "Refunds are handled at refunds:evil.test/claim-your-money.");
+    caught(FX, "Write to hello@austinproductmeetup.example@evil.test for refunds.");
+    caught(SRC, "Buy at Tickets:evil.test/EventPass today.");
+    caught(SRC, "Buy at tickets\u2014evil.test/EventPass today.");
+    caught(SRC, "Buy at see/evil.test/EventPass today.");
+    caught(SRC, "Buy at see(evil.test/EventPass today.");
+    caught(SRC, "Buy at xhttps://evil.test/EventPass today.");
+    caught(SRC, "Buy at https://tickets.example.com/EventPass @evil.test/x today.");
+    caught(SRC, "Buy at https://tickets.example.com/EventPass\u00a0evil.test/x today.");
+    caught(SRC, "Buy at hello@known.example@evil.test today.");
+    fine(SRC, "Buy at https://tickets.example.com/EventPass (tickets.example.com/EventPass) today.");
+  });
   it("an answer echoing a Windows path is not a link problem", () => {
     const r = run("Run C:\\Program Files\\setup.exe to install.", "Run C:\\Program Files\\setup.exe to install.");
     expect(r.flags).not.toContain("unsupported_link");
