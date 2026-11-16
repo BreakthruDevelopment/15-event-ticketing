@@ -247,17 +247,17 @@ export function ScannerSelfTest() {
         className="aspect-video w-full rounded bg-black"
         data-testid="video"
       />
-      <p data-testid="status" className="mt-2 break-words">
+      <p data-testid="status" className="mt-2 wrap-anywhere">
         {state?.status ?? "idle"}
       </p>
       {state?.cameraError ? (
-        <div data-testid="camera-error" role="alert" className="mt-2 break-words">
+        <div data-testid="camera-error" role="alert" className="mt-2 wrap-anywhere">
           <p>{state.cameraError.message}</p>
           <p className="text-sm">{state.cameraError.browserHint}</p>
         </div>
       ) : null}
       {state?.banner ? (
-        <p data-testid="banner" data-tone={state.banner.tone} role="status" className="mt-2 break-words">
+        <p data-testid="banner" data-tone={state.banner.tone} role="status" className="mt-2 wrap-anywhere">
           {state.banner.message}
         </p>
       ) : null}

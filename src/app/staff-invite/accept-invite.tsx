@@ -66,7 +66,7 @@ export function AcceptInvite({ signedIn }: { signedIn: boolean }) {
 
   if (showingAccepted) {
     return (
-      <p className="break-words text-sm" role="status">
+      <p className="wrap-anywhere text-sm" role="status">
         {showingAccepted.replayed ? "You are already on the door team for " : "You are on the door team for "}
         <span className="font-semibold">{showingAccepted.title}</span>.
       </p>
