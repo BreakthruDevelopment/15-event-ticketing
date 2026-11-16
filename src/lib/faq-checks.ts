@@ -42,25 +42,22 @@ export const NOT_IN_FAQ_TEXT = "The organiser's FAQ doesn't cover that.";
 
 const stripNul = (s: string) => s.replace(/\0/g, "");
 
-// ---------------------------------------------------------------------------------------------------------------------
-// The one normalisation front door
+// One view per purpose. Each folds only what its purpose licenses, so a fold made for one purpose can never erase a
+// difference another purpose depends on:
+//   - NUMERIC view (numbers, times, dates, prices, phones): compatibility characters and every script's decimal digits
+//     become ASCII digits, invisible characters go. NEVER used for a host or a link.
+//   - HOST view (the host of a link): only what IDNA/UTS46 itself maps, done by the URL parser ("ＥＶＩＬ" is "evil", a
+//     zero-width space is nothing). It does NOT fold digits: "tickets二026" and "tickets٢026" are different, registrable hosts.
+//   - LINK TAIL (path, query, fragment), emails, everything else about a link: as written, folded nothing.
+// Each view has its own branded type, produced by exactly one function, and each scanner accepts only its own.
 
-declare const NORMALISED: unique symbol;
-/** Text that has been through `normalizeText`. The scanners accept nothing else, so none of them can read raw text. */
-export type Norm = string & { readonly [NORMALISED]: true };
+declare const NUMERIC: unique symbol;
+declare const AS_WRITTEN: unique symbol;
+/** Text in the numeric view. Only `numericView` makes one. */
+export type NumericText = string & { readonly [NUMERIC]: true };
+/** Text exactly as written, for the link scanner. Only `asWritten` makes one. */
+export type WrittenText = string & { readonly [AS_WRITTEN]: true };
 
-const ROMAN_VALUE: Record<number, number> = {
-  0x216c: 50, 0x216d: 100, 0x216e: 500, 0x216f: 1000, 0x217c: 50, 0x217d: 100, 0x217e: 500, 0x217f: 1000,
-  0x2180: 1000, 0x2181: 5000, 0x2182: 10000, 0x2185: 6, 0x2186: 50, 0x2187: 50000, 0x2188: 100000,
-};
-// Roman-numeral characters (U+2160..2188) are numbers too: "$Ⅹ" is ten dollars. Valued before NFKC turns them into letters.
-const romanValue = (c: string) => {
-  const cp = c.codePointAt(0) as number;
-  if (ROMAN_VALUE[cp]) return String(ROMAN_VALUE[cp]);
-  if (cp >= 0x2160 && cp <= 0x216b) return String(cp - 0x2160 + 1);
-  if (cp >= 0x2170 && cp <= 0x217b) return String(cp - 0x2170 + 1);
-  return c;
-};
 // Decimal digits come in runs of ten starting at zero, in every script: the digit's value is its offset in its run.
 const isNd = (cp: number) => cp > 0 && /\p{Nd}/u.test(String.fromCodePoint(cp));
 function foldDigit(c: string): string {
@@ -71,40 +68,39 @@ function foldDigit(c: string): string {
   return String((cp - start) % 10);
 }
 
-/**
- * THE front door. Every scanner below (links, emails, phones, numbers, times, dates, prices, zones) reads text that has
- * been through this and nothing else, once for the sources and once for the answer, so there is a single canonical view
- * of free text and no scanner has a normalisation of its own to get wrong:
- *  - the CJK ideographic digits (〇一二三四五六七八九, which are letters, not Nd) and Roman-numeral characters become their number; NFKC (fullwidth and superscript digits, circled digits, compatibility
- *    letters and currency signs, fullwidth full stops);
- *  - every other decimal digit (Arabic-Indic, Devanagari, ...) becomes the ASCII digit it stands for, which NFKC does not do;
- *  - format characters (zero-width space, soft hyphen, BOM, word joiner, ...) are dropped, EXCEPT U+200C and U+200D: IDNA
- *    keeps those two because they change the host they sit in;
- *  - ideographic and halfwidth full stops read as ".", as a browser reads them in a host.
- */
-export function normalizeText(raw: string): Norm {
-  return raw
-    .replace(/[\u3007\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d]/g, (c) => String("\u3007\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d".indexOf(c)))
-    .replace(/[\u2160-\u2188]/g, romanValue)
-    .normalize("NFKC")
-    .replace(/\p{Nd}/gu, foldDigit)
-    .replace(/\p{Cf}/gu, (c) => (c === "\u200c" || c === "\u200d" ? c : ""))
-    .replace(/[\u3002\uff61]/g, ".") as Norm;
+/** The numeric view: NFKC (fullwidth, superscript and circled digits, compatibility currency signs), every `\p{Nd}` digit folded to ASCII, format characters dropped. */
+export function numericView(raw: string): NumericText {
+  return raw.normalize("NFKC").replace(/\p{Nd}/gu, foldDigit).replace(/\p{Cf}/gu, "") as NumericText;
+}
+
+/** The as-written view: nothing is folded. */
+export function asWritten(raw: string): WrittenText {
+  return raw as WrittenText;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Links, emails, phone numbers
 
-// Unicode-aware: a host may be written in any script (internationalised domains and TLDs), and an ASCII-only class would
-// leave "тест.рф" invisible to every check.
-const EMAIL = /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}\p{M}\u200c\u200d-]+(?:\.[\p{L}\p{N}\p{M}\u200c\u200d-]+)+/giu;
-const EMAIL_WHOLE = /^[\p{L}\p{N}._%+-]+@[\p{L}\p{N}\p{M}\u200c\u200d-]+(?:\.[\p{L}\p{N}\p{M}\u200c\u200d-]+)+$/iu;
+// What may not be part of a host label or a mail local part (whitespace, URL delimiters, brackets, quotes of every kind,
+// dashes), and the full stops (ASCII, ideographic, fullwidth, halfwidth) that separate labels. Everything else, in any
+// script, invisible characters included, is a label character: a domain is recognised BROADLY and its host is then
+// mapped by the URL parser, so a character we did not think of cannot hide one.
+// Whitespace, EXCEPT U+FEFF (JS counts the BOM as whitespace; UTS46 deletes it, so inside a host it is nothing).
+const WS = String.raw`\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000`;
+const DELIM = String.raw`${WS}/\\?#@:()<>[\]"',;*_!–—‹›‘’“”«»`;
+const DOT = String.raw`.。．｡`;
+const LABEL = `[^${DELIM}${DOT}]+`;
+const TLD = String.raw`[\p{L}\p{M}\p{Cf}]{2,}`;
+const DOMAIN = `(?:${LABEL}[${DOT}])+${TLD}`;
+const EMAIL = new RegExp(`[^${DELIM}]+@${DOMAIN}`, "giu");
+const EMAIL_WHOLE = new RegExp(`^[^${DELIM}]+@${DOMAIN}$`, "iu");
+const PLAIN_HOST = new RegExp(`^(?:[^${DELIM}${DOT}]|[${DOT}])+$`, "u");
 // Any "scheme://" starts a link, glued to a preceding word or not, a dotless host ("http://evil") or not; "www." too.
 const LINK_START = /(?:[a-z][a-z0-9+.-]*:\/\/|\bwww\.)\S*/i;
-const DOMAIN_START = /^(?:[\p{L}\p{N}\p{M}\u200c\u200d-]+\.)+[\p{L}\p{M}]{2,}/iu;
+const DOMAIN_START = new RegExp(`^${DOMAIN}`, "iu");
 // No lookahead after the TLD: the link is sliced from the match start to the end of the token, so a lookahead could only
 // hide a domain ("evil.test-x/x#tickets.example.com/EventPass").
-const DOMAIN_ANY = /(?:[\p{L}\p{N}\p{M}\u200c\u200d-]+\.)+[\p{L}\p{M}]{2,}/iu;
+const DOMAIN_ANY = new RegExp(DOMAIN, "iu");
 const PHONE = /(?:\+?\d{1,3}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b|\b\d{3}[\s.-]\d{4}\b|\+\d[\d\s().-]{8,}\d/g;
 
 /** Strip sentence punctuation from the end of a token: . , ; : ! ? quotes, ">" and an unbalanced ")" or "]". */
@@ -112,13 +108,13 @@ function trimTail(t: string): string {
   for (;;) {
     const c = t[t.length - 1];
     const unbalanced = (open: string, close: string) => c === close && t.split(close).length > t.split(open).length;
-    if (c && (".,;:!?'\">".includes(c) || unbalanced("(", ")") || unbalanced("[", "]"))) t = t.slice(0, -1);
+    if (c && (".,;:!?'\">’”›»".includes(c) || unbalanced("(", ")") || unbalanced("[", "]"))) t = t.slice(0, -1);
     else return t;
   }
 }
 
 /**
- * Links and emails in `input`. Links first, then emails in what is left.
+ * Links and emails in `text`, as written. Links first, then emails in what is left.
  *
  * TWO PROPERTIES THAT MATTER, and both must hold:
  *  1. A link is a MAXIMAL run of non-whitespace characters, from its "http(s)://", "www." or bare-domain start to the next
@@ -130,10 +126,10 @@ function trimTail(t: string): string {
  *     link must never fall through unchecked.
  * Emails are lower-cased; links are returned exactly as written.
  */
-export function findLinksAndEmails(text: Norm): { emails: string[]; links: string[] } {
+export function findLinksAndEmails(text: WrittenText): { emails: string[]; links: string[] } {
   const emails: string[] = [];
   const links: string[] = [];
-  for (const raw of text.split(/\s+/)) {
+  for (const raw of text.split(new RegExp(`[${WS}]+`, "u"))) {
     const withScheme = LINK_START.exec(raw);
     if (withScheme) {
       links.push(trimTail(raw.slice(withScheme.index)));
@@ -160,48 +156,42 @@ export function findLinksAndEmails(text: Norm): { emails: string[]; links: strin
   return { emails, links };
 }
 
-export function findPhones(text: Norm): string[] {
+export function findPhones(text: NumericText): string[] {
   return (text.match(PHONE) ?? []).map((m) => m.replace(/\D/g, "")).filter((d) => d.length >= 7);
 }
 
 /**
- * An answer link must EQUAL a source link, byte for byte, after only these: the scheme and host are lower-cased; the
- * answer may leave the scheme out (but never states a different one: "http://" is not "https://"); one trailing "/" of the path more
- * or less (never inside a query or fragment). Nothing is repaired into equality: no decoding, no case folding of path/query, no "www." added or dropped, no
- * default ports. The model is repeating links from sources we gave it, so it has no reason to vary one; a false alarm
- * only degrades to the quoted source (which prints the real link), a miss serves a bad link to everyone for 24 h.
+ * The host as a browser resolves it: UTS46 mapping by the URL parser (case, fullwidth forms, ideographic stops, ignored
+ * characters), punycode out. Only a plain host goes through it: anything with a port, userinfo, backslash, percent-escape
+ * or other delimiter keeps its raw text and so never equals another link's host (the parser would drop part of it).
+ */
+function hostKey(host: string): string {
+  if (!PLAIN_HOST.test(host)) return `raw:${host.toLowerCase()}`;
+  try {
+    return new URL(`http://${host}`).hostname;
+  } catch {
+    return `raw:${host.toLowerCase()}`;
+  }
+}
+
+/**
+ * An answer link must EQUAL a source link after only these: the scheme is lower-cased; the host is compared as a browser
+ * resolves it (`hostKey`); the answer may leave the scheme out (but never states a different one: "http://" is not
+ * "https://"); one trailing "/" of the path more or less. The path, query and fragment are compared AS WRITTEN: no folding,
+ * no decoding, no case change, and a slash inside a query or fragment is data. No "www." added or dropped, no default
+ * ports. The model is repeating links from sources we gave it, so it has no reason to vary one; a false alarm only
+ * degrades to the quoted source (which prints the real link), a miss serves a bad link to everyone for 24 h.
  */
 export function parseLink(link: string): { scheme: "http" | "https" | ""; key: string } {
   const m = /^(https?):\/\//i.exec(link);
   const rest = link.slice(m ? m[0].length : 0);
   const cut = rest.search(/[/?#]/);
-  const host = (cut < 0 ? rest : rest.slice(0, cut)).toLowerCase();
+  const host = cut < 0 ? rest : rest.slice(0, cut);
   const tail = cut < 0 ? "" : rest.slice(cut);
-  // The one trailing slash that may differ is the PATH's ("host/" is "host"); a slash inside a query or fragment is data.
   const pathEnd = tail.search(/[?#]/);
   const path = pathEnd < 0 ? tail : tail.slice(0, pathEnd);
   const rest2 = pathEnd < 0 ? "" : tail.slice(pathEnd);
-  return { scheme: (m ? m[1].toLowerCase() : "") as "http" | "https" | "", key: host + path.replace(/\/$/, "") + rest2 };
-}
-
-/**
- * What follows a token's host: its path, query and fragment, exactly as written. A browser keeps every character of these
- * ("/\uff36\uff29\uff30" is a different page from "/VIP", and so is one with a zero-width space in it), while the front
- * door folds compatibility characters and drops invisible ones: right for hosts and numbers, wrong for a path. So a link
- * whose tail the front door would change is refused: the model has no reason to write one, and a flag only degrades to the
- * quoted source.
- */
-const tokenTail = (token: string) => {
-  const at = token.indexOf("://");
-  const rest = token.slice(at < 0 ? 0 : at + 3);
-  const cut = rest.search(/[/?#]/);
-  return cut < 0 ? "" : rest.slice(cut);
-};
-function hasUnstableLinkTail(answer: string): boolean {
-  return answer.split(/\s+/).some((token) => {
-    const tail = tokenTail(token);
-    return tail !== "" && normalizeText(tail) !== tail && findLinksAndEmails(normalizeText(token)).links.length > 0;
-  });
+  return { scheme: (m ? m[1].toLowerCase() : "") as "http" | "https" | "", key: hostKey(host) + path.replace(/\/$/, "") + rest2 };
 }
 
 function linkMatches(a: ReturnType<typeof parseLink>, s: ReturnType<typeof parseLink>): boolean {
@@ -292,10 +282,15 @@ const canonNumber = (raw: string) => {
  * as their value ("3rd" is 3, "1,000" is 1000), and words with digits ("b12") lower-cased. `ignore` is a set of
  * citation ids to leave out (the answer may say "(F3)"; an INVENTED "E99" is not ignored).
  */
-export function numberTokens(input: Norm, ignore: Set<string> = new Set()): Set<string> {
+const ROMAN_NUMERAL = /^M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/;
+const CJK_NUMERAL = /[\u3007\u96f6\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u4e07\u842c\u5104\u4ebf\u5146\u58f9\u8cb3\u8d30\u53c3\u53c1\u8086\u4f0d\u9678\u9646\u67d2\u634c\u7396\u62fe\u4f70\u4edf\u5eff\u5345]/;
+export function numberTokens(input: NumericText, ignore: Set<string> = new Set()): Set<string> {
+  const out = new Set<string>();
+  // Numerals the numeric view cannot turn into digits (Roman numerals, CJK ideographic numerals) are not "out of scope"
+  // but REFUSED: each must appear as itself in the source, so "十 dollars" can never pass for a price it is not.
+  for (const m of input.matchAll(/(?<![\p{L}\p{N}])[IVXLCDM]+(?![\p{L}\p{N}])/gu)) if (m[0] !== "I" && ROMAN_NUMERAL.test(m[0])) out.add(`r:${m[0]}`);
   let s: string = input.toLowerCase();
   for (const id of ignore) s = s.replace(new RegExp(`\\b${id.toLowerCase()}\\b`, "g"), " ");
-  const out = new Set<string>();
   // Calendar words are facts too: a month, a weekday and a month-and-day pair must each appear in a cited source
   // ("January 3" against a source that says "December 3" is a different date; so is "Friday" for "Thursday").
   zoneTokens(input, out);
@@ -337,7 +332,7 @@ export function numberTokens(input: Norm, ignore: Set<string> = new Set()): Set<
     return " ";
   });
   // A numeric character the front door could not turn into a digit must appear, as itself, in the source.
-  for (const m of s.matchAll(/[^\d]/gu)) if (/\p{N}/u.test(m[0])) out.add(`n:${m[0]}`);
+  for (const m of s.matchAll(/[^\d]/gu)) if (/\p{N}/u.test(m[0]) || CJK_NUMERAL.test(m[0])) out.add(`n:${m[0]}`);
   for (const m of s.match(NUMBER) ?? []) {
     const ordinal = /^(\d+)(?:st|nd|rd|th)$/.exec(m);
     if (ordinal) out.add(canonNumber(ordinal[1]));
@@ -353,15 +348,15 @@ export function numberTokens(input: Norm, ignore: Set<string> = new Set()): Set<
 export function unsupportedParts(answer: string, sourceText: string, citedIds: string[]): string[] {
   const flags: string[] = [];
 
-  // One front door: both texts are normalised here, once, and only the normalised text reaches a scanner.
-  const ans = normalizeText(answer);
-  const src = normalizeText(sourceText);
-  const a = findLinksAndEmails(ans);
-  const s = findLinksAndEmails(src);
+  // Each purpose gets its own view of each text, once: links and emails as written, numbers and phones in the numeric view.
+  const a = findLinksAndEmails(asWritten(answer));
+  const s = findLinksAndEmails(asWritten(sourceText));
   if (a.emails.some((e) => !s.emails.some((x) => x === e))) flags.push("unsupported_email");
   const srcLinks = s.links.map(parseLink);
-  if (hasUnstableLinkTail(answer) || a.links.some((l) => !srcLinks.some((x) => linkMatches(parseLink(l), x)))) flags.push("unsupported_link");
+  if (a.links.some((l) => !srcLinks.some((x) => linkMatches(parseLink(l), x)))) flags.push("unsupported_link");
 
+  const ans = numericView(answer);
+  const src = numericView(sourceText);
   const srcPhones = findPhones(src);
   if (findPhones(ans).some((d) => !srcPhones.some((p) => p.endsWith(d) || d.endsWith(p)))) flags.push("unsupported_phone");
 

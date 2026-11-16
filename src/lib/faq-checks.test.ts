@@ -1,11 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { type SourceMap, checkFaqAnswer, findLinksAndEmails as findLinksAndEmailsNorm, findPhones as findPhonesNorm, normalizeText, numberTokens as numberTokensNorm, quotedText } from "./faq-checks";
+import { type SourceMap, asWritten, checkFaqAnswer, findLinksAndEmails as findLinksAndEmailsView, findPhones as findPhonesView, numberTokens as numberTokensView, numericView, quotedText } from "./faq-checks";
 
-// The scanners take normalised text only (a type error otherwise); these helpers send raw test strings through the front door.
-const numberTokens = (s: string, ignore?: Set<string>) => numberTokensNorm(normalizeText(s), ignore);
-const findLinksAndEmails = (s: string) => findLinksAndEmailsNorm(normalizeText(s));
-const findPhones = (s: string) => findPhonesNorm(normalizeText(s));
+// Each scanner takes its own branded view of the text (a type error otherwise); these helpers send raw test strings through it.
+const numberTokens = (s: string, ignore?: Set<string>) => numberTokensView(numericView(s), ignore);
+const findLinksAndEmails = (s: string) => findLinksAndEmailsView(asWritten(s));
+const findPhones = (s: string) => findPhonesView(numericView(s));
 
 const sources: SourceMap = new Map([
   ["E1", { id: "E1", kind: "event", label: "when", text: "When: starts Thursday, December 3, 2026 at 7:00 PM CST; ends Thursday, December 3, 2026 at 9:00 PM CST. Doors open Thursday, December 3, 2026 at 6:30 PM CST." }],
@@ -333,41 +333,62 @@ describe("links: an answer link must equal a source link", () => {
   });
 });
 
-describe("the normalisation front door", () => {
-  const SRC = "Parking is $10. Doors open at 9:30 PM CST on December 4. Call 512-555-9999. Refunds up to 2 hours.\nTickets at https://زيتون.example/pay and السلام.example.";
+describe("one view per purpose", () => {
+  const SRC = "Parking is $10. Doors open at 9:30 PM CST on December 4. Call 512-555-9999. Refunds up to 2 hours.\nTickets at https://\u0632\u064a\u062a\u0648\u0646.example/pay and \u0627\u0644\u0633\u0644\u0627\u0645.example and https://tickets2026.example/vip.";
   const map: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: `Q\n${SRC}` }]]);
   const run = (answer: string) => checkFaqAnswer({ status: "answered", answer, citations: ["F1"] }, map);
 
   it("digits in any script are read as the number they are: a different value is refused, the same value passes", () => {
     for (const bad of [
-      "Parking is ＄１００.", // fullwidth $100
-      "Parking is $١٠٠.", // Arabic-Indic 100
-      "Parking is $१००.", // Devanagari 100
-      "Parking is $¹⁰⁰.", // superscript 100
-      "Parking is $①⓪⓪.", // circled 100
-      "Parking is $ⅩⅩ.", // roman numeral X X = "1010"
-      "Parking is $Ⅽ.", // roman numeral C = 100
-      "Doors open at ９:３０ AM CST.",
-      "Doors open at ٩:٣٠ AM CST.",
-      "Doors on December ４４.",
-      "Call ５１２-５５５-９９８９.",
-      "Call ٥١٢-٥٥٥-٩٩٩٨.",
-      "Refunds up to ２２ hours.",
-      "Refunds up to 〇 hours.", // an ideographic zero: kept as itself, so it is not in the source
+      "Parking is \uff04\uff11\uff10\uff10.", // fullwidth $100
+      "Parking is $\u0661\u0660\u0660.", // Arabic-Indic 100
+      "Parking is $\u0967\u0966\u0966.", // Devanagari 100
+      "Parking is $\u00b9\u2070\u2070.", // superscript 100
+      "Parking is $\u2460\u24ea\u24ea.", // circled 100
+      "Doors open at \uff19:\uff13\uff10 AM CST.",
+      "Doors open at \u0669:\u0663\u0660 AM CST.",
+      "Doors on December \uff14\uff14.",
+      "Call \uff15\uff11\uff12-\uff15\uff15\uff15-\uff19\uff19\uff18\uff19.",
+      "Call \u0665\u0661\u0662-\u0665\u0665\u0665-\u0669\u0669\u0669\u0668.",
+      "Refunds up to \uff12\uff12 hours.",
     ]) {
       expect(run(bad), bad).toMatchObject({ mode: "quoted", answer: null });
     }
     for (const good of [
-      "Parking is ＄１０.",
-      "Parking is $١٠.",
-      "Parking is $१०.",
-      "Parking is $Ⅹ.",
-      "Doors open at ９:３０ PM CST on December ４.",
-      "Call ٥١٢-٥٥٥-٩٩٩٩.",
-      "Refunds up to ２ hours.",
+      "Parking is \uff04\uff11\uff10.",
+      "Parking is $\u0661\u0660.",
+      "Parking is $\u0967\u0966.",
+      "Doors open at \uff19:\uff13\uff10 PM CST on December \uff14.",
+      "Call \u0665\u0661\u0662-\u0665\u0665\u0665-\u0669\u0669\u0669\u0669.",
+      "Refunds up to \uff12 hours.",
     ]) {
       expect(run(good).mode, good).toBe("model");
     }
+  });
+
+  it("numerals that cannot be read as digits are refused, never silently accepted (Roman, CJK, any script)", () => {
+    for (const bad of [
+      "Tickets are \u5341 dollars.", // CJK ten
+      "Tickets are \u58f9\u4f70 dollars.", // financial 100
+      "Tickets are X dollars.", // ASCII Roman numeral
+      "Parking is $\u2169.", // Roman numeral character
+      "Parking is $\u216d.",
+      "Parking is $\u2169\u2169.",
+      "Parking is XIV dollars.",
+      "Parking is $\u4e00.", // CJK one: not folded to 1 any more, refused like its neighbours
+      "Refunds up to \u3007 hours.",
+      "Refunds up to \u4e8c hours.",
+      "Doors open at \u4e5d:\u4e09\u3007 PM CST.",
+    ]) {
+      expect(run(bad), bad).toMatchObject({ mode: "quoted", answer: null, flags: expect.arrayContaining(["unsupported_number"]) });
+    }
+    // verbatim in the source, they are the source's own words
+    const roman: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nThe XIV Summit starts at \u5341 sharp." }]]);
+    expect(checkFaqAnswer({ status: "answered", answer: "The XIV Summit.", citations: ["F1"] }, roman).mode).toBe("model");
+    expect(checkFaqAnswer({ status: "answered", answer: "It starts at \u5341 sharp.", citations: ["F1"] }, roman).mode).toBe("model");
+    expect(checkFaqAnswer({ status: "answered", answer: "The XV Summit.", citations: ["F1"] }, roman).mode).toBe("quoted");
+    // ordinary capital letters are not numerals
+    expect(run("I think so: see F1.").mode).toBe("model");
   });
 
   it("every Unicode decimal digit folds to the ASCII digit ICU says it is", () => {
@@ -378,63 +399,89 @@ describe("the normalisation front door", () => {
       const glyphs = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => fmt.format(n));
       if (!glyphs.every((g) => /^\p{Nd}$/u.test(g))) continue; // algorithmic systems (roman, han) are not digit runs
       glyphs.forEach((g, n) => {
-        expect(normalizeText(g), `${nu} ${n}`).toBe(String(n));
+        expect(numericView(g), `${nu} ${n}`).toBe(String(n));
         checked++;
       });
     }
     expect(checked).toBeGreaterThan(300);
-    // and no decimal digit anywhere is left unfolded
     for (let cp = 0x80; cp < 0x1ffff; cp++) {
       const ch = String.fromCodePoint(cp);
-      if (/\p{Nd}/u.test(ch)) expect(normalizeText(ch), cp.toString(16)).toMatch(/^[0-9]$/);
+      if (/\p{Nd}/u.test(ch)) expect(numericView(ch), cp.toString(16)).toMatch(/^[0-9]$/);
     }
   });
 
-  it("a path or query is compared as written: compatibility and invisible characters in it are not folded away", () => {
+  it("the host view maps only what UTS46 maps: digits are NOT folded in a host", () => {
+    const H = "Tickets at https://tickets2026.example/vip today.";
+    const m: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: `Q\n${H}` }]]);
+    const r = (host: string) => checkFaqAnswer({ status: "answered", answer: `Tickets at https://${host}/vip today.`, citations: ["F1"] }, m);
+    expect(r("tickets2026.example").mode).toBe("model");
+    expect(r("TICKETS2026.Example").mode).toBe("model");
+    expect(r("\uff54\uff49\uff43\uff4b\uff45\uff54\uff53\uff12\uff10\uff12\uff16.example").mode).toBe("model"); // fullwidth ASCII is UTS46-mapped
+    expect(r("tickets2026\u3002example").mode).toBe("model"); // ideographic full stop separates labels
+    expect(r("tickets\u200b2026.example").mode).toBe("model"); // a zero-width space is ignored by UTS46
+    expect(r("tickets\u2461026.example").mode).toBe("model"); // a circled 2 IS mapped to "2" by UTS46: the same host
+    for (const host of [
+      "tickets\u4e8c026.example", // CJK two
+      "tickets\u0968026.example", // Devanagari two
+      "tickets\u0662026.example", // Arabic-Indic two
+      "tickets\u2161026.example", // Roman numeral two (maps to the letters "ii")
+      "ticketsII026.example",
+    ]) {
+      expect(r(host), host).toMatchObject({ mode: "quoted", answer: null, flags: expect.arrayContaining(["unsupported_link"]) });
+    }
+    // the same keys also hold for a bare, scheme-less host
+    const bare = checkFaqAnswer({ status: "answered", answer: "Tickets at tickets\u4e8c026.example/vip today.", citations: ["F1"] }, m);
+    expect(bare.mode).toBe("quoted");
+  });
+
+  it("ZWNJ and ZWJ change the host (IDNA keeps them); other invisible characters do not", () => {
+    expect(numericView("a\u200cb\u200dc\u200bd\u00ade\ufeff")).toBe("abcde");
+    const host = "\u0632\u064a\u062a\u0648\u0646.example";
+    expect(run(`Tickets at https://${host}/pay.`).mode).toBe("model");
+    expect(run("Tickets at https://\u0632\u064a\u062a\u0648\u200c\u0646.example/pay.")).toMatchObject({ mode: "quoted", flags: expect.arrayContaining(["unsupported_link"]) });
+    expect(run("Tickets at https://\u0632\u064a\u062a\u0648\u200d\u0646.example/pay.").mode).toBe("quoted");
+    expect(run("Write evil\u200c.test now.").mode).toBe("quoted");
+    expect(run("Tickets at https://\u0632\u064a\u062a\u0648\u200b\u0646.example/pay.").mode).toBe("model");
+  });
+
+  it("a path or query is compared as written: nothing in it is folded", () => {
     const m: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nBuy at https://tickets.example.com/VIP?id=12 today." }]]);
     const r = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, m);
     expect(r("Buy at https://tickets.example.com/VIP?id=12 today.").mode).toBe("model");
     for (const bad of [
-      "Buy at https://tickets.example.com/\uff36\uff29\uff30?id=12 today.", // fullwidth VIP (Codex's case)
-      "Buy at https://tickets.example.com/VIP\u200b?id=12 today.", // zero-width space in the path
-      "Buy at https://tickets.example.com/V\u00adIP?id=12 today.", // soft hyphen
-      "Buy at https://tickets.example.com/VIP?id=\uff11\uff12 today.", // fullwidth digits in the query
+      "Buy at https://tickets.example.com/\uff36\uff29\uff30?id=12 today.", // fullwidth VIP
+      "Buy at https://tickets.example.com/VIP\u200b?id=12 today.",
+      "Buy at https://tickets.example.com/V\u00adIP?id=12 today.",
+      "Buy at https://tickets.example.com/VIP?id=\uff11\uff12 today.",
       "Buy at https://tickets.example.com/VIP?id=\u0661\u0662 today.",
       "Buy at tickets.example.com/\uff36\uff29\uff30?id=12 today.",
     ]) {
       expect(r(bad), bad).toMatchObject({ mode: "quoted", answer: null, flags: expect.arrayContaining(["unsupported_link"]) });
     }
-    // the host is still read as a browser reads it: an invisible character in the host is the same host
-    expect(r("Buy at https://tickets.example\u200b.com/VIP?id=12 today.").mode).toBe("model");
+    expect(r("Buy at https://tickets.example\u200b.com/VIP?id=12 today.").mode).toBe("model"); // the host view ignores it
   });
 
-  it("ZWNJ and ZWJ are kept (IDNA keeps them: they change the host); other format characters are dropped", () => {
-    expect(normalizeText("a‌b‍c")).toBe("a‌b‍c");
-    expect(normalizeText("a​b­c﻿d⁠e")).toBe("abcde");
-    expect(normalizeText("evil。test Ａ")).toBe("evil.test A");
-    const host = "زيتون.example";
-    expect(run(`Tickets at https://${host}/pay.`).mode).toBe("model");
-    expect(run(`Tickets at https://زيتو‌ن.example/pay.`)).toMatchObject({ mode: "quoted", flags: expect.arrayContaining(["unsupported_link"]) });
-    expect(run("Tickets at https://زيتو‍ن.example/pay.").mode).toBe("quoted");
-    expect(run("Write evil‌.test now.").mode).toBe("quoted");
-    expect(run("Tickets at https://زيتو​ن.example/pay.").mode).toBe("model"); // ZWSP is dropped: the same host
-  });
-
-  it("no scanner reads raw text: they only accept Norm, and nothing else normalises", () => {
+  it("each scanner accepts only its own view, and nothing else folds text", () => {
     // compile-time: a raw string is a type error (checked by `pnpm typecheck`)
-    // @ts-expect-error scanners accept normalised text only
-    expect(() => numberTokensNorm("7pm")).not.toThrow();
-    // @ts-expect-error scanners accept normalised text only
-    expect(() => findPhonesNorm("512-555-0100")).not.toThrow();
-    // @ts-expect-error scanners accept normalised text only
-    expect(() => findLinksAndEmailsNorm("a.example")).not.toThrow();
-    // module boundary: every exported scanner is declared over Norm, and the only normalisation calls live in the front door
+    // @ts-expect-error numeric scanners accept the numeric view only
+    expect(() => numberTokensView("7pm")).not.toThrow();
+    // @ts-expect-error numeric scanners accept the numeric view only
+    expect(() => findPhonesView("512-555-0100")).not.toThrow();
+    // @ts-expect-error the link scanner accepts as-written text only
+    expect(() => findLinksAndEmailsView("a.example")).not.toThrow();
+    // @ts-expect-error a numeric view is not as-written text
+    expect(() => findLinksAndEmailsView(numericView("a.example"))).not.toThrow();
+    // module boundary: each exported scanner is declared over its view; the only casts into a view and the only
+    // normalisation calls live in the two view functions
     const code = readFileSync(new URL("./faq-checks.ts", import.meta.url), "utf8");
-    for (const fn of ["findLinksAndEmails", "findPhones", "numberTokens"]) expect(code, fn).toMatch(new RegExp(`export function ${fn}\\(\\w+: Norm`));
+    expect(code).toMatch(/export function findLinksAndEmails\(\w+: WrittenText\)/);
+    for (const fn of ["findPhones", "numberTokens"]) expect(code, fn).toMatch(new RegExp(`export function ${fn}\\(\\w+: NumericText`));
+    expect(code.match(/as NumericText/g)).toHaveLength(1);
+    expect(code.match(/as WrittenText/g)).toHaveLength(1);
     expect(code.match(/\.normalize\(/g)).toHaveLength(1);
-    expect(code.match(/\\p\{Cf\}/g)).toHaveLength(1);
-    const door = code.slice(code.indexOf("export function normalizeText"), code.indexOf("// ----", code.indexOf("export function normalizeText")));
-    expect(door).toContain(".normalize(");
-    expect(door).toContain("\\p{Cf}");
+    expect(code.match(/\\p\{Cf\}\/gu/g)).toHaveLength(1);
+    const view = code.slice(code.indexOf("export function numericView"), code.indexOf("export function asWritten"));
+    expect(view).toContain(".normalize(");
+    expect(view).toContain("as NumericText");
   });
 });

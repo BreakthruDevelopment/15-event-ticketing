@@ -25,29 +25,57 @@ function rng(seed: number) {
   };
 }
 
-// ---- the oracle: crude and independent of production --------------------------------------------------------------------
-// Production normalises with a regex chain (Roman values, NFKC, a run-offset digit fold, a Cf filter). This does not share
-// any of it: digits come from ICU's own numbering systems, the mapping is a per-character loop, and what counts as a
-// "domain" or a "path" is a deliberately broad scan. If this were a copy of production it would inherit its blind spots.
+// ---- the oracle: crude, independent, and with its OWN policy ------------------------------------------------------------
+// Production's views are a regex chain plus the URL parser. This shares none of that, and it does not share production's
+// POLICY either: it is derived from the IDNA rules (UTS46 / IDNA2008), written down here once.
+//   host view   NFKC + case-fold (UTS46 maps compatibility forms: fullwidth "ＥＶＩＬ" is "evil", Roman "Ⅱ" is "ii", circled
+//               "②" is "2"); ignorable characters (ZWSP, soft hyphen, word joiner, BOM, bidi marks) are deleted; ideographic
+//               full stops separate labels; ZWNJ/ZWJ are KEPT (CONTEXTJ). It does NOT turn other scripts' decimal digits
+//               into ASCII ones: Arabic-Indic, Devanagari and CJK digits are valid, distinct label characters.
+//   number view the opposite licence: every script's decimal digit (read from ICU's numbering systems, not from a range
+//               table) is the ASCII digit it stands for.
+//   numerals    Roman and CJK numerals are not digits in any view; if the answer has one the source lacks, it is a bypass.
 const DIGIT_OF = new Map<string, string>();
 for (const nu of Intl.supportedValuesOf("numberingSystem")) {
   const f = new Intl.NumberFormat(`en-u-nu-${nu}`, { useGrouping: false });
   const g = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => f.format(n));
-  if (g.every((x) => [...x].length === 1)) g.forEach((x, n) => DIGIT_OF.set(x, String(n)));
+  if (g.every((x) => /^\p{Nd}$/u.test(x))) g.forEach((x, n) => DIGIT_OF.set(x, String(n))); // decimal-digit systems only
 }
-const ROMAN_OF: Record<string, string> = { "\u2160": "1", "\u2161": "2", "\u2162": "3", "\u2163": "4", "\u2164": "5", "\u2165": "6", "\u2166": "7", "\u2167": "8", "\u2168": "9", "\u2169": "10", "\u216a": "11", "\u216b": "12", "\u216c": "50", "\u216d": "100", "\u216e": "500", "\u216f": "1000" };
+const isIgnorable = (cp: number) => (cp >= 0x200b && cp <= 0x200f && cp !== 0x200c && cp !== 0x200d) || cp === 0xad || cp === 0xfeff || cp === 0x2060 || (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069);
 
-function view(s: string): string {
+function hostView(s: string): string {
+  let out = "";
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) as number;
+    if (cp === 0x3002 || cp === 0xff61 || cp === 0xff0e) out += ".";
+    else if (!isIgnorable(cp)) out += ch;
+  }
+  return out.normalize("NFKC").toLowerCase();
+}
+function numView(s: string): string {
   let out = "";
   for (const ch of s) {
     const cp = ch.codePointAt(0) as number;
     if (DIGIT_OF.has(ch)) out += DIGIT_OF.get(ch);
-    else if (ROMAN_OF[ch]) out += ROMAN_OF[ch];
-    else if (cp === 0x3002 || cp === 0xff61 || cp === 0xff0e) out += ".";
-    else if ((cp >= 0x200b && cp <= 0x200f && cp !== 0x200c && cp !== 0x200d) || cp === 0xad || cp === 0xfeff || cp === 0x2060 || (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069)) continue;
-    else out += ch;
+    else if (!isIgnorable(cp) && cp !== 0x200c && cp !== 0x200d) out += ch;
   }
-  return out.normalize("NFKC").toLowerCase();
+  return out.normalize("NFKC"); // case kept: Roman numerals are capitals
+}
+
+const CJK_NUMERALS = "〇零一二三四五六七八九十百千万萬億亿兆壹貳贰參叁肆伍陸陆柒捌玖拾佰仟廿卅";
+// A Roman numeral by arithmetic: value it, write that value back canonically, and compare.
+function isRoman(t: string): boolean {
+  const V: Record<string, number> = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
+  let n = 0;
+  for (let i = 0; i < t.length; i++) n += V[t[i]] < (V[t[i + 1]] ?? 0) ? -V[t[i]] : V[t[i]];
+  let back = "";
+  for (const [sym, v] of [["M", 1000], ["CM", 900], ["D", 500], ["CD", 400], ["C", 100], ["XC", 90], ["L", 50], ["XL", 40], ["X", 10], ["IX", 9], ["V", 5], ["IV", 4], ["I", 1]] as const) {
+    while (n >= v) {
+      back += sym;
+      n -= v;
+    }
+  }
+  return t !== "I" && back === t;
 }
 
 // What may NOT be part of a host label or a mail local part, for the crude scan: whitespace, URL delimiters, brackets,
@@ -63,7 +91,8 @@ const HOST_AFTER_SCHEME = /[a-z][a-z0-9+.-]*:\/\/([^\s/?#\\]+)/g;
  *  - domains, emails and hosts after a scheme;
  *  - whole links/paths/schemes: the link-looking token (from its scheme or domain, minus trailing punctuation) must be a
  *    case-insensitive substring of the source, scheme included when the answer states one;
- *  - numbers: every digit run (after reading any script's digits) must be a digit run the source has.
+ *  - numbers: every digit run (after reading any script's digits) must be a digit run the source has;
+ *  - Roman and CJK numerals the source does not contain.
  */
 /** `t` occurs in `s` as a whole token: followed by whitespace, the end, or sentence punctuation that is itself followed by one of those. */
 function appears(s: string, t: string): boolean {
@@ -77,32 +106,40 @@ function appears(s: string, t: string): boolean {
 }
 
 function ungrounded(answer: string, source: string): string[] {
-  const a = view(answer);
-  const s = view(source);
+  const a = hostView(answer);
+  const s = hostView(source);
   const names = [...(a.match(DOMAIN_CRUDE) ?? []), ...(a.match(EMAIL_CRUDE) ?? []), ...[...a.matchAll(HOST_AFTER_SCHEME)].map((m) => m[1])].filter((f) => !s.includes(f));
   const found: string[] = [...names];
   for (const token of a.split(/\s+/)) {
     const m = LINKISH.exec(token);
     if (!m) continue;
-    const t = m[0].replace(/[.,;:!?)\]>'"\u2019\u201d\u2039*_]+$/g, "");
+    const t = m[0].replace(/[.,;:!?)\]>'"’”‹*_]+$/g, "");
     // only the path's trailing slash may differ, never one inside a query or fragment
     const tt = /[?#]/.test(t) ? t : t.replace(/\/$/, "");
     // ("host?q" and "host/?q" are the same page: the empty path may be written either way)
     const bare = tt.replace(/^((?:[a-z][a-z0-9+.-]*:\/\/)?[^/?#]+)([?#])/, "$1/$2");
     if (tt && !appears(s, tt) && !appears(s, bare)) found.push(tt);
   }
-  // A path/query is compared as written: if reading it the way a browser reads a host (folding, dropping invisibles) would
-  // change it, the answer has changed what a browser keeps.
+  // A path/query is compared as written: if the host view (UTS46-style folding, dropping invisibles) would change it, the
+  // answer has changed what a browser keeps.
   for (const token of answer.split(/\s+/)) {
-    if (!LINKISH.test(view(token))) continue;
+    if (!LINKISH.test(hostView(token))) continue;
     const at = token.indexOf("://");
     const rest = token.slice(at < 0 ? 0 : at + 3);
     const cut = rest.search(/[/?#]/);
     const tail = cut < 0 ? "" : rest.slice(cut);
-    if (tail && view(tail) !== tail.toLowerCase()) found.push(`~${tail}`);
+    if (tail && hostView(tail) !== tail.toLowerCase()) found.push(`~${tail}`);
   }
-  const sourceRuns = new Set(s.match(/[0-9]+/g) ?? []);
-  for (const run of a.match(/[0-9]+/g) ?? []) if (!sourceRuns.has(run)) found.push(`#${run}`);
+  // numbers, in the number view
+  const na = numView(answer);
+  const ns = numView(source);
+  const sourceRuns = new Set(ns.match(/[0-9]+/g) ?? []);
+  for (const run of na.match(/[0-9]+/g) ?? []) if (!sourceRuns.has(run)) found.push(`#${run}`);
+  // numerals that are not digits: a Roman or CJK numeral the source does not itself contain
+  const romans = (t: string) => (t.match(/(?<![\p{L}\p{N}])[IVXLCDM]+(?![\p{L}\p{N}])/gu) ?? []).filter(isRoman);
+  const sourceRomans = new Set(romans(ns));
+  for (const r of romans(na)) if (!sourceRomans.has(r)) found.push(`R${r}`);
+  for (const ch of na) if (CJK_NUMERALS.includes(ch) && !ns.includes(ch)) found.push(`N${ch}`);
   return found;
 }
 
@@ -114,10 +151,12 @@ const SOURCES = [
   NUMERIC_SOURCE,
   "Tickets at https://\u0632\u064a\u062a\u0648\u0646.example/pay today.",
   "Go to https://tickets.example.com/?return=/VIP/ today.",
+  "Tickets at https://tickets2026.example/vip today. The XIV Summit.",
 ];
 const mapFor = (text: string): SourceMap => new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: `Q\n${text}` }]]);
 
 const HOSTS = [
+  "tickets2026.example", "tickets\u0662026.example", "tickets\u0968026.example", "tickets\u4e8c026.example", "tickets\u2161026.example", "tickets\u2461026.example", "ticketsII026.example", "tickets\u200b2026.example", "tickets2026\u3002example", "\uff54ickets2026.example",
   "evil.test", "Evil.TEST", "evil.test.", "tickets.example.com", "TICKETS.example.com", "www.tickets.example.com", "tickets.example.com.evil.test",
   "evil-tickets.example.com", "ticket5.example.com", "xn--e1aybc.xn--p1ai", "тест.рф", "bücher.example", "例え.jp", "раураl.com",
   "evil。test", "evil．test", "evil｡test", "evil​.test", "evil.te­st", "ev⁠il.test", "evil.﻿ test".replace(" ", ""),
@@ -143,6 +182,7 @@ const ATOMS = [
   "Doors open at 9:30 PM CST.", "Doors open at 9:45 PM CST.", "Doors open at 19:30 CST.", "Doors open at 9:30 AM CST.",
   "Doors open on December 4.", "Doors open on December 5.", "Doors open on December 14.", "Doors open on December 4, 2026.",
   "Call 512-555-9999.", "Call 512-555-9998.", "Call (512) 555-9999.", "Call 512 555 9999.", "Refunds up to 2 hours.", "Refunds up to 3 hours.", "Refunds up to 20 hours.", "Refunds up to 0 hours.",
+  "Tickets are X dollars.", "Parking is $\u2169.", "Tickets are \u5341 dollars.", "Tickets are \u58f9\u4f70 dollars.", "The XIV Summit.", "The XV Summit.", "Parking is $\u4e00\u3007.", "I think so, and see C or D.",
 ];
 function inScript(text: string, r: () => number): string {
   if (r() < 0.25) return text;
@@ -172,7 +212,7 @@ function answerFrom(r: () => number): string {
 }
 
 describe("grounding property: an ungrounded domain, email or host never passes as the model's answer", () => {
-  it("holds for 6000 seeded hostile answers against six sources", () => {
+  it("holds for 6000 seeded hostile answers against seven sources", () => {
     // FAQ_PROPERTY_SEED / FAQ_PROPERTY_RUNS widen the hunt locally; CI uses the fixed defaults.
     const r = rng(Number(process.env.FAQ_PROPERTY_SEED ?? 20261115));
     const failures: string[] = [];
@@ -199,7 +239,12 @@ describe("grounding property: an ungrounded domain, email or host never passes a
     expect(ungrounded("Parking is $\uff11\uff10.", NUMERIC_SOURCE)).toEqual([]);
     expect(ungrounded("Parking is $\u0661\u0660.", NUMERIC_SOURCE)).toEqual([]);
     expect(ungrounded("Parking is $\u0661\u0660\u0660.", NUMERIC_SOURCE)).toEqual(["#100"]);
-    expect(ungrounded("Parking is $\u216d.", NUMERIC_SOURCE)).toEqual(["#100"]);
+    expect(ungrounded("Parking is $\u216d.", NUMERIC_SOURCE)).toEqual(["RC"]);
+    expect(ungrounded("Tickets are \u5341 dollars.", NUMERIC_SOURCE)).toEqual(["N\u5341"]);
+    expect(ungrounded("The XIV Summit, I think, and CIVIL MILD.", NUMERIC_SOURCE)).toEqual(["RXIV"]);
+    // the host view does not fold other scripts' digits; UTS46 does map circled and fullwidth forms
+    expect(ungrounded("Go to tickets\u0662026.example/vip", SOURCES[6])).not.toEqual([]);
+    expect(ungrounded("Go to tickets\u2461026.example/vip", SOURCES[6])).toEqual([]);
     expect(ungrounded("Call \u0665\u0661\u0662-\u0665\u0665\u0665-\u0669\u0669\u0669\u0668.", NUMERIC_SOURCE)).toEqual(["#9998"]);
   });
 });
