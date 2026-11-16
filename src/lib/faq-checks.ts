@@ -4,8 +4,10 @@
  *
  *  1. Citations must exist in the source map built from THIS event's rows at ask time (`E1`-`E5`, `F<ref_no>`); others
  *     are dropped (`unknown_citation`), whatever event they came from. `answered` with none left becomes `not_in_faq`.
- *  2. Every number, time, price and date token in the answer must appear in a cited source ("7pm", "7:00 PM" and "19:00"
- *     are the same time; "$10" and "10 dollars" the same price).
+ *  2. Every number, time, price, date and QUANTITY in the answer must appear in a cited source ("7pm", "7:00 PM" and
+ *     "19:00" are the same time; "$10" and "10 dollars" the same price). This half FAILS CLOSED: a word standing where a
+ *     quantity belongs that the file cannot value ("a couple of dollars", "a tenner") is refused, not ignored, so the
+ *     cost of a spelling nobody listed is a quoted answer rather than a number the organiser never wrote.
  *  3. Every link, email address and phone number must appear in a cited source (links and emails as the same text,
  *     phones by their digits).
  * If 2 or 3 fails the answer becomes `quoted`: the cited sources' own text, verbatim, headed "From the organiser's FAQ:".
@@ -17,7 +19,7 @@
  * idea; the property test (`faq-checks.property.test.ts`) derives its oracle from the same authorities separately.
  */
 
-import { CURRENCY_SIGN, currencyIsoAlt, currencyNameAlt, currencyOfSign, currencyOfWord, currencyWordAlt } from "./currency";
+import { CURRENCY_SIGN, currencyNameWords, currencyOfSign, currencyOfWord, currencyWordAlt } from "./currency";
 import { classOf, hasNumericValue, parserDeletedClass, parserStrippedClass } from "./unicode-derived";
 
 export type Source = {
@@ -255,16 +257,43 @@ const MONEY_SYMBOL = new RegExp(`(${CURRENCY_SIGN})\\s?(${AMOUNT})`, "gu");
 const MONEY_SYMBOL_AFTER = new RegExp(`(${AMOUNT})\\s?(${CURRENCY_SIGN})`, "gu");
 let moneyWordRe: RegExp | undefined;
 const moneyWord = () => (moneyWordRe ??= new RegExp(`(${AMOUNT})\\s?(${currencyWordAlt()})\\b`, "g"));
-// "a dollar" is 1 dollar; "a real treat", "a try" are not. Declared, short, and tied to the oracle's own idea of the same line.
-const ARTICLE_UNITS = "dollars?|euros?|pounds?|yen|bucks?";
-let oneRes: { sign: RegExp; name: RegExp; iso: RegExp; article: RegExp } | undefined;
-const oneContexts = () =>
-  (oneRes ??= {
-    sign: new RegExp(`(?<=${CURRENCY_SIGN}\\s?)\\bone\\b`, "giu"),
-    name: new RegExp(`\\bone\\b(?=\\s?(?:${currencyNameAlt()}|[ap]\\.?m(?![\\p{L}\\p{N}]))(?![\\p{L}\\p{N}]))`, "giu"),
-    iso: new RegExp(`\\b[Oo][Nn][Ee]\\b(?=\\s?(?:${currencyIsoAlt()})(?![\\p{L}\\p{N}]))`, "gu"),
-    article: new RegExp(`\\b(?:a|an)\\s+(?=(?:${ARTICLE_UNITS})(?![\\p{L}\\p{N}]))`, "giu"),
-  });
+// ---------------------------------------------------------------------------------------------------------------------
+// QUANTITIES, AND WHY THIS PART FAILS CLOSED
+//
+// A grounded-answer check must not have to RECOGNISE a quantity in order to be suspicious of one. Thirteen review rounds
+// of "add this spelling to the list" showed why: the space of English quantity expressions is not enumerable, so every
+// list leaves the next spelling ("one buck", "a couple of dollars", "several dollars", "a tenner", "half an hour") as a
+// silent pass. So the rule is inverted: WHERE THE ANSWER PUTS SOMETHING IN A QUANTITY SLOT AND THIS FILE CANNOT VALUE IT,
+// THE ANSWER IS REFUSED and the attendee sees the organiser's own text instead.
+//
+// Nothing below decides correctness by being complete. `SMALL` gives values to the words it knows; `QUANT_STOP` names
+// words that never quantify anything ("in dollars", "US dollars"). A word missing from either list makes this STRICTER:
+// it becomes an unvaluable quantity word, which the source can satisfy only by using the same word. The cost of an
+// unlisted word is therefore a false alarm (a worse answer), never a bypass (a wrong one).
+//
+// Evidence has two strengths, because an article is weaker than a figure:
+//   STRONG  a digit run, a numeral, or a number word written out ("one dollar", "ten dollars").
+//   WEAK    the quantity 1 read from "a"/"an" in front of a unit ("a dollar"). The answer may write an article where the
+//           source states 1 outright, but the source's article does NOT license the answer to state $1 as a figure
+//           (round 14, B2: "Members save a dollar" must not license "Tickets cost $1").
+
+/** A unit takes a quantity in front of it. Currency NAME words are the one currency table's; no runtime data lists units of time. */
+const TIME_UNITS = ["second", "minute", "hour", "day", "week", "month", "year"];
+let unitAltMemo: string | undefined;
+const unitAlt = () =>
+  (unitAltMemo ??= [...currencyNameWords(), ...TIME_UNITS.flatMap((w) => [w, `${w}s`])]
+    .sort((a, b) => b.length - a.length)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|"));
+
+// "a dollar", "an hour" is the quantity 1 — but not "a pound of coffee" (a measure of something else) or
+// "a yen-denominated price" (the unit is a modifier). Both exceptions are structural, not a list of nouns.
+let articleRe: RegExp | undefined;
+const articleOne = () => (articleRe ??= new RegExp(`(?<![\\p{L}\\p{N}])an?\\s+(?=(?:${unitAlt()})(?![\\p{L}\\p{N}-])(?!\\s+of(?![\\p{L}\\p{N}])))`, "giu"));
+
+// "one" is the numeral 1 wherever it stands, EXCEPT these prose frames. The list shortens the refusals; a frame nobody
+// listed is refused, which is why "There is one exit." against a source saying "four exits" no longer passes.
+const ONE_PROSE = /(?<![\p{L}\p{N}])(?:no|the|each|every|any|which|this|that|some)\s+one(?![\p{L}\p{N}])|(?<![\p{L}\p{N}])one\s+(?:of|another|more)(?![\p{L}\p{N}])/gu;
 let romanContextRe: RegExp | undefined;
 const romanContext = () =>
   (romanContextRe ??= new RegExp(
@@ -318,11 +347,65 @@ function zoneTokens(input: string, out: Set<string>) {
   for (const m of input.matchAll(ZONE_NAMED)) out.add(`z:${m[1].toLowerCase()}`);
 }
 
-/** "ten" -> "10", "twenty-five" -> "25", "one hundred" -> "100". A lone "one" stays a word ("one of the rooms"). */
+// Words that never quantify anything, so they do not make what stands in front of a unit suspicious ("in dollars",
+// "the dollar", "US dollars"). Only a false-alarm reducer: a word missing here is reported, not ignored.
+const QUANT_STOP = new Set(
+  ("a an the this that these those there here in of for to by at on off per and or with from as is are was were be been being it its their your our my his her" +
+    " not but so then only just about around over under more less fewer than up down each every another other same first last next free" +
+    " cost costs costing price priced prices pay paid plus minus us american canadian australian british japanese swiss mexican singapore hong kong zealand").split(" "),
+);
+/** A crude singular/plural fold, so "a guest" is licensed by a source that writes "guests". */
+const stem = (w: string) => w.replace(/(?:es|s)$/, "");
+/** The space between a quantity and what it counts: an ordinary space or a no-break space, never a hyphen or a slash. */
+const SP = "[ \\u00a0]";
+let quantRes: { beforeUnit: RegExp; articleOf: RegExp; articleEnd: RegExp; word: RegExp; unit: RegExp } | undefined;
+const quantPatterns = () =>
+  (quantRes ??= {
+    // "several dollars", "a few dollars": whatever stands immediately in front of a unit is the amount.
+    beforeUnit: new RegExp(`(?<![\\p{L}\\p{N}])(\\p{L}+)${SP}+(?:${unitAlt()})(?![\\p{L}\\p{N}-])`, "gu"),
+    // "a couple of dollars", "a quarter of the seats": the partitive quantifier frame.
+    articleOf: new RegExp(`(?<![\\p{L}\\p{N}])an?${SP}+(\\p{L}+)${SP}+of(?![\\p{L}\\p{N}])`, "gu"),
+    // "a tenner.": "a"/"an" and one word that closes the phrase, so the word IS the amount ("a real treat" is not).
+    articleEnd: new RegExp(`(?<![\\p{L}\\p{N}])an?${SP}+(\\p{L}+)(?=["'\\u2019\\u201d]?(?:[.,;:!?)\\]]|$))`, "gu"),
+    word: /\p{L}+/gu,
+    unit: new RegExp(`^(?:${unitAlt()})$`, "u"),
+  });
+
+/**
+ * Words the answer puts in a quantity slot that this file cannot value — the fail-closed half of the number check.
+ * Each becomes `q:<stem>`, which only a source using the same word can satisfy (`quantityVocabulary`). Words the numeral
+ * rules already own (Roman numerals, characters with a Unicode numeric value) are left to them.
+ */
+export function quantityClaims(input: NumericText): Set<string> {
+  const low = (input as string).toLowerCase();
+  const p = quantPatterns();
+  const out = new Set<string>();
+  const unvaluable = (w: string) =>
+    w !== "" &&
+    !(w in SMALL) &&
+    w !== "hundred" &&
+    w !== "thousand" &&
+    !QUANT_STOP.has(w) &&
+    !ROMAN_NUMERAL.test(w.toUpperCase()) &&
+    ![...w].some((c) => hasNumericValue(c));
+  for (const re of [p.beforeUnit, p.articleOf, p.articleEnd]) {
+    re.lastIndex = 0;
+    for (const m of low.matchAll(re)) if (unvaluable(m[1]) && !p.unit.test(m[1])) out.add(`q:${stem(m[1])}`);
+  }
+  return out;
+}
+
+/** Every word the source uses, as `q:` tokens: what a quantity word in the answer has to be matched by. */
+export function quantityVocabulary(input: NumericText): Set<string> {
+  const out = new Set<string>();
+  for (const m of (input as string).toLowerCase().matchAll(quantPatterns().word)) out.add(`q:${stem(m[0])}`);
+  return out;
+}
+
+/** "ten" -> "10", "twenty-five" -> "25", "one hundred" -> "100", "one" -> "1" (prose frames are blanked before this runs). */
 function numberWordsToDigits(s: string): string {
   return s.replace(NUM_WORDS_RE, (m) => {
     const words = m.split(/[\s-]+/).filter((w) => w !== "and");
-    if (words.length === 1 && words[0] === "one") return m;
     let total = 0;
     let cur = 0;
     for (const w of words) {
@@ -348,9 +431,12 @@ const canonNumber = (raw: string) => {
  * Every number-like thing in `input`, in one canonical form: times as `t:HH:MM` (24-hour), prices as `$N`, other numbers
  * as their value ("3rd" is 3, "1,000" is 1000), and words with digits ("b12") lower-cased. `ignore` is a set of
  * citation ids to leave out (the answer may say "(F3)"; an INVENTED "E99" is not ignored).
+ *
+ * `articles` reads "a"/"an" in front of a unit as the quantity 1. That is WEAK evidence, so `unsupportedParts` runs this
+ * twice per text and keeps the two apart: see the note above `TIME_UNITS`.
  */
 const ROMAN_NUMERAL = /^M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/;
-export function numberTokens(input: NumericText, ignore: Set<string> = new Set()): Set<string> {
+export function numberTokens(input: NumericText, ignore: Set<string> = new Set(), articles = false): Set<string> {
   const out = new Set<string>();
   // Numerals the numeric view cannot turn into digits (Roman numerals, CJK ideographic numerals) are not "out of scope"
   // but REFUSED: each must appear as itself in the source, so "十 dollars" can never pass for a price it is not.
@@ -363,13 +449,11 @@ export function numberTokens(input: NumericText, ignore: Set<string> = new Set()
   // 3. ASCII letters only where they are used AS a number, not as a word ("a mix of demos", "30 cm"): straight after a
   //    currency sign, or straight before a currency word or am/pm ("iv dollars", "at ix pm"). The text is lower-cased FIRST,
   //    so "IV USD", "Iv dollars" and "iV dollars" are the same as "iv usd"; the sign and the words are the shared table's.
-  // 4. A number WORD in money or time context is a number. Every number word but "one" is always a number ("two", "twenty",
-  //    "a hundred": see `numberWordsToDigits`); "one" is also prose ("one of the exits", "no one"), so it is a number only in
-  //    context: right after a currency sign, or right before a currency name, an uppercase ISO code, or am/pm ("one dollar",
-  //    "one USD", "one pm"). The article reads as the quantity 1 before a currency unit ("a dollar", "an euro"). Where the line
-  //    is drawn: ISO codes count only in capitals (a lowercase "one try" is prose), and the article only before ARTICLE_UNITS.
-  const oneIn = oneContexts();
-  const wordsAsNumbers = plain.replace(oneIn.sign, "1").replace(oneIn.name, "1").replace(oneIn.iso, "1").replace(oneIn.article, "1 ");
+  // 4. A number WORD is the number it spells, wherever it is written: "two", "twenty", "a hundred" and now "one" too
+  //    (`numberWordsToDigits`). "one" used to count only next to money or a clock, which left every count outside those two
+  //    contexts unchecked ("There is one exit." against "four exits"); it is now a number everywhere but in the prose frames
+  //    of `ONE_PROSE`, which are blanked below. With `articles`, "a"/"an" in front of a unit reads as 1 as well.
+  const wordsAsNumbers = articles ? plain.replace(articleOne(), "1 ") : plain;
   const lowered = wordsAsNumbers.toLowerCase();
   for (const m of lowered.matchAll(romanContext())) {
     const t = (m[1] ?? m[2]).toUpperCase();
@@ -380,6 +464,8 @@ export function numberTokens(input: NumericText, ignore: Set<string> = new Set()
   // Calendar words are facts too: a month, a weekday and a month-and-day pair must each appear in a cited source
   // ("January 3" against a source that says "December 3" is a different date; so is "Friday" for "Thursday").
   zoneTokens(input, out);
+  // "one of the exits", "no one", "one more thing": the prose frames, blanked so the numeral rule does not read them as 1.
+  s = s.replace(ONE_PROSE, (m) => m.replace("one", " "));
   s = numberWordsToDigits(s);
   s = s.replace(new RegExp(`\\b(${Object.keys(MONTH_ABBR).join("|")})\\.?(?=\\s*\\d)`, "g"), (_m, a: string) => MONTH_ABBR[a]);
   s = s.replace(/\b(may|march)(?=\s+\d)/g, "$1!");
@@ -449,8 +535,15 @@ export function unsupportedParts(answer: string, sourceText: string, citedIds: s
   const srcPhones = findPhones(src);
   if (findPhones(ans).some((d) => !srcPhones.some((p) => p.endsWith(d) || d.endsWith(p)))) flags.push("unsupported_phone");
 
-  const have = numberTokens(src);
-  const want = numberTokens(ans, new Set(citedIds));
+  // Quantities, in two strengths plus the fail-closed catch-all (see the note above `TIME_UNITS`). A weak token carries a
+  // "?" so it can only ever be answered by the source's weak set; the source's weak set contains everything its strong set
+  // does, so an answer's "a dollar" is still licensed by a source that says "one dollar" or "$1".
+  const haveStrong = numberTokens(src);
+  const haveWeak = numberTokens(src, new Set(), true);
+  const wantStrong = numberTokens(ans, new Set(citedIds));
+  const wantWeak = numberTokens(ans, new Set(citedIds), true);
+  const have = new Set([...haveStrong, ...[...haveWeak].map((t) => `${t}?`), ...quantityVocabulary(src)]);
+  const want = new Set([...wantStrong, ...[...wantWeak].filter((t) => !wantStrong.has(t)).map((t) => `${t}?`), ...quantityClaims(ans)]);
   for (const t of want) {
     if (!have.has(t)) {
       flags.push("unsupported_number");

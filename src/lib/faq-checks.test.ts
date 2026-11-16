@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { type SourceMap, asWritten, checkFaqAnswer, findLinksAndEmails as findLinksAndEmailsView, findPhones as findPhonesView, numberTokens as numberTokensView, numericView, quotedText } from "./faq-checks";
-import { currencyOfSign, currencyOfWord } from "./currency";
+import { currencyNameWords, currencyOfSign, currencyOfWord } from "./currency";
 import { NUMERIC_TYPE_RANGES } from "./unicode-numeric.generated";
 import { deletedCodePoints, hasNumericValue } from "./unicode-derived";
 
@@ -597,6 +597,24 @@ describe("derived lists: the class, not the instances", () => {
       expect(numberTokens("¢10")).toEqual(numberTokens("10¢".replace("10¢", "¢10")));
       expect(numberTokens("¢10")).not.toEqual(numberTokens("£10"));
     });
+    // B1's root cause: "buck"/"bucks"/"rmb" were claimed AFTER the loop that fills `nameWords`, so `currencyNameWords()` and
+    // the rules built from it did not know them while `currencyOfWord()` did. There is one list now, and this fails if it
+    // ever splits again: every word the currency table can price must also be a word the quantity rules treat as a unit.
+    it("every colloquial currency word is a NAME word, and every NAME word prices and quantifies alike", () => {
+      const names = currencyNameWords();
+      for (const w of ["buck", "bucks", "rmb"]) {
+        expect(names, w).toContain(w);
+        expect(currencyOfWord(w), w).not.toBe(`w:${w}`);
+      }
+      // the whole set, not a sample: EVERY name word is a unit to the quantity rules, so the two can never go out of step
+      // again. ("dirham" and friends name several currencies and are their own currency, which is `currencyOfWord`'s job.)
+      const src: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nParking costs $10." }]]);
+      expect(names.size).toBeGreaterThan(100);
+      for (const w of names) {
+        expect(checkFaqAnswer({ status: "answered", answer: `Parking costs a ${w}.`, citations: ["F1"] }, src).mode, `a ${w}`).toBe("quoted");
+        expect(checkFaqAnswer({ status: "answered", answer: `Parking costs one ${w}.`, citations: ["F1"] }, src).mode, `one ${w}`).toBe("quoted");
+      }
+    });
     it("the table reads signs and words from ICU", () => {
       expect(currencyOfSign("$")).toBe("usd");
       expect(currencyOfSign("₹")).toBe("inr");
@@ -609,6 +627,8 @@ describe("derived lists: the class, not the instances", () => {
 
   describe("numerals from Unicode Numeric_Type", () => {
     const NUMERIC = allCodePoints(hasNumericValue);
+    // 1.1M code points against 219 range pairs: ~2.2 s on a loaded machine, so the 5 s default is a coin flip rather than a
+    // signal (review round 14, S3). The scan is the point of the test, so the timeout moves instead of the scan.
     it("the generated table covers what \\p{N} does not, and \\p{N} covers every character the table lists", () => {
       const table = allCodePoints((c) => NUMERIC_TYPE_RANGES.some((v, i) => i % 2 === 0 && (c.codePointAt(0) as number) >= v && (c.codePointAt(0) as number) <= NUMERIC_TYPE_RANGES[i + 1]));
       expect(table.length).toBeGreaterThan(1900);
@@ -617,7 +637,7 @@ describe("derived lists: the class, not the instances", () => {
       expect(table).toContain("〹");
       // letters with numeric values are the reason \p{N} alone is not enough
       expect(table.filter((c) => !/\p{N}/u.test(c)).length).toBeGreaterThan(50);
-    });
+    }, 60_000);
     it("every character with a numeric value either folds to ASCII digits or is refused unless the source has it", () => {
       expect(NUMERIC.length).toBeGreaterThan(1900);
       for (const c of NUMERIC) {
@@ -687,13 +707,15 @@ describe("derived lists: the class, not the instances", () => {
   });
 });
 
-// Codex 4582788038: "one dollar" was never checked, because a lone "one" is prose. A number word in money or time context is a
-// number. Covered: every number word (zero..ninety, hundred, thousand, dozen) always; "one" in context (after a currency sign,
-// before a currency name, an uppercase ISO code, or am/pm); "a"/"an" before dollar, euro, pound, yen, buck.
-describe("number words in money and time context are checked", () => {
+// Codex 4582788038 asked for "one dollar"; thirteen rounds then found "one buck", "a couple of dollars", "a tenner" and
+// "half an hour", each time by hand, because the check only knew the spellings someone had listed. The rule is now inverted:
+// a word standing where a quantity belongs that the file cannot value is REFUSED, so an unlisted spelling costs a quoted
+// answer rather than a fabricated number. These tests pin both directions — what must be refused, and what that costs.
+describe("quantities fail closed: what cannot be valued is refused", () => {
   const SRC = "Parking costs $10. Doors open at 6:30 PM CST. Tickets are free.";
   const m: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: `Q\n${SRC}` }]]);
   const run = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, m);
+  const refuses = (a: string) => expect(run(a), a).toMatchObject({ mode: "quoted", flags: expect.arrayContaining(["unsupported_number"]) });
 
   it("a price or time spelled as a word must be the source's price or time", () => {
     for (const bad of [
@@ -702,7 +724,24 @@ describe("number words in money and time context are checked", () => {
       "Parking costs a thousand dollars.", "Parking costs a dozen dollars.", "Parking costs five bucks.", "Parking costs a buck.", "Doors open at one pm.", "Doors open at One PM.", "Doors open at one a.m.",
       "Doors open at five pm.", "Doors open at twelve am.",
     ]) {
-      expect(run(bad), bad).toMatchObject({ mode: "quoted", flags: expect.arrayContaining(["unsupported_number"]) });
+      refuses(bad);
+    }
+  });
+  // Review round 14, B1: "a buck" was caught and "one buck" was not, because the article rule's units were typed out here
+  // while the currency NAME words were built from ICU — and "buck" was claimed after the loop that fills them. One list now.
+  it("a colloquial currency name is a currency name in every rule (B1)", () => {
+    for (const bad of ["Parking costs one buck.", "Parking costs a buck.", "Parking costs one bucks.", "Parking costs several bucks.", "Parking is one rmb."]) refuses(bad);
+  });
+  // Review round 14, B3: the quantity class is open, so the check refuses what it cannot value instead of ignoring it.
+  it("a quantity expression no list contains is refused, not ignored (B3)", () => {
+    const counts: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nParking costs $10. The talk lasts 45 minutes. There are four exits. 20 seats are reserved." }]]);
+    const r = (a: string) => expect(checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, counts), a).toMatchObject({ mode: "quoted", flags: expect.arrayContaining(["unsupported_number"]) });
+    for (const bad of [
+      "Parking costs a couple of dollars.", "Parking costs a few dollars.", "Parking costs several dollars.", "Parking costs a pair of dollars.", "Parking costs a couple bucks.",
+      "Parking costs one usd.", "Parking costs one cent.", "Parking costs one quid.", "Parking costs a tenner.", "Parking costs a handful of dollars.", "Parking costs half a dollar.",
+      "The talk lasts half an hour.", "The talk lasts a couple of hours.", "The talk lasts a few minutes.", "There is one exit.", "A quarter of the seats are reserved.",
+    ]) {
+      r(bad);
     }
   });
   it("the source's own price and time, spelled either way, pass", () => {
@@ -712,9 +751,50 @@ describe("number words in money and time context are checked", () => {
     for (const good of ["Parking costs one dollar.", "Parking costs $1.", "Parking costs a dollar.", "Doors open at 1 pm.", "Doors open at one pm."]) expect(r(good), good).toBe("model");
     expect(r("Parking costs two dollars.")).toBe("quoted");
   });
+  it("a quantity word the source itself uses is the source's own word", () => {
+    const vague: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nParking is a couple of dollars. Refunds take several days. It is a real treat." }]]);
+    const r = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, vague).mode;
+    for (const good of ["Parking is a couple of dollars.", "Refunds take several days.", "It is a real treat.", "Parking is a couple of dollars and refunds take several days."]) expect(r(good), good).toBe("model");
+    expect(r("Parking is a dozen dollars.")).toBe("quoted");
+  });
+  // Review round 14, B2: the article rule ran on the SOURCE too, so ordinary organiser prose minted a price the answer
+  // could then state as a figure. An article is weaker evidence than a figure and now licenses only another article.
+  it("an article in the source is not a price the answer may state as a figure (B2)", () => {
+    const cases: Array<[string, string]> = [
+      ["Tickets are $25. Members save a dollar.", "Tickets cost $1."],
+      ["Tickets are a dollar cheaper at the door.", "Tickets cost $1."],
+      ["Parking: not a dollar more than posted.", "Parking costs $1."],
+      ["Members save a pound on every drink.", "Drinks cost £1."],
+    ];
+    for (const [src, answer] of cases) {
+      const map: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: `Q\n${src}` }]]);
+      expect(checkFaqAnswer({ status: "answered", answer, citations: ["F1"] }, map), answer).toMatchObject({ mode: "quoted", flags: expect.arrayContaining(["unsupported_number"]) });
+      // the same article back is still the source's own words
+      expect(checkFaqAnswer({ status: "answered", answer: src, citations: ["F1"] }, map).mode, src).toBe("model");
+    }
+  });
   it("prose uses of \"one\" and \"a\" are still prose", () => {
-    for (const ok of ["One of the exits is by the front desk.", "No one is turned away.", "Come one hour before doors.", "Give it one try.", "One more thing: it is a real treat.", "There is a top-floor bar and a pen for you.", "One pizza each."]) {
+    for (const ok of ["One of the exits is by the front desk.", "No one is turned away.", "One more thing: it is free.", "There is a top-floor bar and a pen for you.", "Someone will meet you."]) {
       expect(run(ok).flags, ok).not.toContain("unsupported_number");
     }
+  });
+  // What failing closed costs. Each of these is honest and still refused, which shows the attendee the organiser's own text
+  // instead: a worse answer, not a wrong one. Recorded so the price is visible rather than argued about.
+  it("the false alarms failing closed buys are these, and they are refusals, not bad answers", () => {
+    // "one" is the numeral everywhere outside its prose frames, so a count the source never states is refused
+    for (const cost of ["Come one hour before doors.", "Give it one try.", "One pizza each."]) refuses(cost);
+    // every ICU currency NAME word is a unit, and a few of them are ordinary English words ("real", "mark")
+    refuses("It is a real treat.");
+    expect(run("Come one hour before doors.")).toMatchObject({ mode: "quoted", answer: null, citations: ["F1"] });
+  });
+  // Review round 14, S2: the article rule fired on compound nouns. Two of the three shapes are structural and now suppressed.
+  it("a unit used as a measure of something else, or as a modifier, is not an amount (S2)", () => {
+    const cafe: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nThe cafe sells coffee by the pound. Prices are shown in US dollars." }]]);
+    const r = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, cafe).mode;
+    expect(r("You can buy a pound of coffee at the cafe.")).toBe("model");
+    expect(r("A yen-denominated price is not listed.")).toBe("model");
+    expect(r("Prices are shown in US dollars.")).toBe("model");
+    // still refused, and reported as the cost of firing broadly: the unit is the head of no phrase we can parse
+    expect(r("There is a dollar store next door.")).toBe("quoted");
   });
 });

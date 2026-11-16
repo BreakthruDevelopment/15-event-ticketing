@@ -144,34 +144,79 @@ function romans(raw: string): string[] {
   return out;
 }
 
-// Number WORDS. English spell-out is not in ICU or JS, so this list IS hand-written, here, declared, and built differently from
-// production's (positional arrays, not a keyed map). A number word is a number where it is used as one: right after a currency
-// sign, or right before a currency word (a name word, or an ISO code written in capitals: lowercase "try" is a word) or am/pm;
-// "a"/"an" is the quantity 1 before a dollar, euro, pound, yen or buck. Elsewhere ("one of the exits") it is prose.
+// QUANTITY EXPRESSIONS, and the one place this oracle FAILS CLOSED.
+//
+// English spell-out is not in ICU or JS, so the VALUES below are hand-written, here, declared, and built differently from
+// production's (positional arrays, not a keyed map). What is NOT hand-written is the decision about a word these lists cannot
+// value: a word sitting where a quantity belongs — in front of a unit, or after "a"/"an" in a quantifier frame — is reported
+// as an ungrounded quantity IN ITS OWN RIGHT unless the source uses the same word. So "a couple of dollars", "several
+// dollars", "a tenner" and "a quarter of the seats" are all caught without anybody listing "couple", "several", "tenner" or
+// "quarter". The lists only keep honest answers out of the report; a word missing from one makes this scan stricter, never
+// looser, which is the opposite of the enumerate-the-spellings loop this file exists to end.
 const ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"];
 const TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
 const WORD_VALUE = new Map<string, number>([...ONES.map((w, i) => [w, i] as const), ...TENS.map((w, i) => [w, i * 10] as const).filter(([w]) => w), ["hundred", 100], ["thousand", 1000], ["dozen", 12]]);
 const NAME_WORDS = new Set([...CURRENCY_WORDS].filter((w) => !(w.length === 3 && Intl.supportedValuesOf("currency").includes(w.toUpperCase()))));
-const ISO_CODES = new Set(Intl.supportedValuesOf("currency"));
-function wordNumbers(raw: string): { all: number[]; inContext: number[] } {
-  const all: number[] = [];
-  const inContext: number[] = [];
-  for (const m of raw.matchAll(/[\p{L}]+/gu)) {
-    const word = m[0].toLowerCase();
-    const i = m.index as number;
-    const after = raw.slice(i + m[0].length).replace(/^\s/, "");
-    const next = /^\p{L}+/u.exec(after)?.[0] ?? "";
-    const prev = raw.slice(0, i).replace(/\s$/, "");
-    const isNumberWord = WORD_VALUE.has(word);
-    const article = (word === "a" || word === "an") && /^(dollars?|euros?|pounds?|yen|bucks?)$/i.test(next);
-    if (!isNumberWord && !article) continue;
-    const v = article ? 1 : (WORD_VALUE.get(word) as number);
-    all.push(v);
-    const money = NAME_WORDS.has(next.toLowerCase()) || ISO_CODES.has(next);
-    const clock = /^[ap]\.?m(?![\p{L}\p{N}])/iu.test(after);
-    if (article || /\p{Sc}$/u.test(prev) || money || clock) inContext.push(v);
+// A unit takes a quantity in front of it: a currency NAME word (ICU's, via CURRENCY_WORDS) or a unit of time.
+const TIME_WORDS = ["second", "minute", "hour", "day", "week", "month", "year"].flatMap((w) => [w, `${w}s`]);
+const UNITS = new Set([...NAME_WORDS, ...TIME_WORDS]);
+// Words that never quantify anything, so they do not make the word in front of a unit suspicious ("in dollars", "the dollar",
+// "US dollars"). Missing an entry costs a false alarm here, never a missed bypass.
+const NOT_A_QUANTITY = new Set(
+  "a an the this that these those there here in of for to by at on off per and or with from as is are was were be been being it its their your our my his her not but so then only just about around over under more less fewer than up down each every another other same first last next free cost costs costing price priced prices pay paid plus minus us american canadian australian british japanese swiss mexican singapore hong kong zealand euro half".split(" "),
+);
+// "one" is the numeral 1 everywhere EXCEPT these prose frames ("one of the exits", "no one", "one more thing").
+const ONE_BEFORE = new Set(["of", "another", "more"]);
+const ONE_AFTER = new Set(["no", "the", "each", "every", "any", "which", "this", "that", "some"]);
+
+type Quantities = {
+  /** Values the text states outright ("one", "ten", "a hundred"). */
+  values: number[];
+  /** Value 1 read from an article in front of a unit ("a dollar"): weaker evidence, so it licenses only another article. */
+  weak: number[];
+  /** Words in a quantifier slot that the lists above cannot value ("couple", "several", "tenner"). */
+  words: string[];
+};
+function quantities(raw: string): Quantities {
+  const low = raw.toLowerCase();
+  const toks = [...low.matchAll(/[\p{L}]+/gu)];
+  const at = (i: number) => toks[i]?.[0] ?? "";
+  const end = (i: number) => (toks[i] ? (toks[i].index as number) + toks[i][0].length : 0);
+  /** The text between token i and token i+1 (so a hyphen or a slash is not the space a quantity phrase needs). */
+  const gap = (i: number) => (toks[i + 1] ? low.slice(end(i), toks[i + 1].index as number) : "");
+  const spaced = (i: number) => /^[ \u00a0]+$/.test(gap(i));
+  /** Token i is the last word of its phrase: sentence punctuation or the end of the text follows it. */
+  const closes = (i: number) => {
+    const after = low.slice(end(i));
+    return after === "" || /^[.,;:!?)\]"'\u2019\u201d]/.test(after);
+  };
+  // A word the NUMERAL rules already own is not reported again here: a Roman numeral ("iv dollars") and any character with a
+  // numeric value ("十 dollars") are refused by `romans` and by the Numeric_Type scan.
+  const isNumeral = (w: string) => isRoman(w.toUpperCase()) || [...w].some((c) => isUcdNumeric(c.codePointAt(0) as number));
+  const out: Quantities = { values: [], weak: [], words: [] };
+  for (let i = 0; i < toks.length; i++) {
+    const word = at(i);
+    const next = at(i + 1);
+    if (word === "one") {
+      if (!(ONE_BEFORE.has(next) || ONE_AFTER.has(at(i - 1)))) out.values.push(1);
+      continue;
+    }
+    if (WORD_VALUE.has(word)) {
+      out.values.push(WORD_VALUE.get(word) as number);
+      continue;
+    }
+    if (word === "a" || word === "an") {
+      // "a dollar", "an hour": the quantity 1 — but not "a pound of coffee" or "a yen-denominated price", where the unit
+      // is a measure or a modifier rather than the amount itself.
+      if (UNITS.has(next) && spaced(i) && !/^-/.test(gap(i + 1)) && at(i + 2) !== "of") out.weak.push(1);
+      // "a couple of dollars", "a tenner.": a quantifier frame filled with a word no list can value.
+      else if (spaced(i) && next && !UNITS.has(next) && !WORD_VALUE.has(next) && !NOT_A_QUANTITY.has(next) && !isNumeral(next) && (at(i + 2) === "of" || closes(i + 1))) out.words.push(next);
+      continue;
+    }
+    // "several dollars", "a few dollars": whatever stands immediately in front of a unit is the amount.
+    if (UNITS.has(next) && spaced(i) && !NOT_A_QUANTITY.has(word) && !isNumeral(word)) out.words.push(word);
   }
-  return { all, inContext };
+  return out;
 }
 
 // A Roman numeral by arithmetic: value it, write that value back canonically, and compare.
@@ -252,9 +297,18 @@ function ungrounded(answer: string, source: string): string[] {
   // numerals that are not digits: a Roman or CJK numeral the source does not itself contain
   const sourceRomans = new Set(romans(source));
   for (const r of romans(answer)) if (!sourceRomans.has(r)) found.push(`R${r}`);
-  const sourceWords = wordNumbers(source).all;
+  // Quantities, fail closed. A value the answer states outright needs the source to state it outright too; a value read from
+  // an article ("a dollar") is weaker evidence, so a source article satisfies it; a quantifier word no list can value needs
+  // the source to use that same word.
+  const src = quantities(source);
+  const ans = quantities(answer);
   const sourceDigits = (ns.match(NUMBER_VALUE) ?? []).map(value);
-  for (const v of wordNumbers(answer).inContext) if (!sourceWords.includes(v) && !sourceDigits.includes(String(v))) found.push(`W${v}`);
+  const stated = [...src.values.map(String), ...sourceDigits];
+  const implied = [...stated, ...src.weak.map(String)];
+  for (const v of ans.values) if (!stated.includes(String(v))) found.push(`W${v}`);
+  for (const v of ans.weak) if (!implied.includes(String(v))) found.push(`W${v}`);
+  const sourceWords = new Set(source.toLowerCase().match(/[\p{L}]+/gu) ?? []);
+  for (const q of ans.words) if (!sourceWords.has(q)) found.push(`Q${q}`);
   for (const ch of na) if ((ch.codePointAt(0) as number) > 0x7f && isUcdNumeric(ch.codePointAt(0) as number) && !DIGIT_OF.has(ch) && !ns.includes(ch)) found.push(`N${ch}`);
   return found;
 }
@@ -303,6 +357,13 @@ const ATOMS = [
   "Parking is one dollar.", "Parking is One Dollar.", "Parking is a dollar.", "Parking is one USD.", "Parking is $one.", "Parking is two dollars.", "Parking is a hundred dollars.", "Parking is ten dollars.", "Doors open at one pm.", "Doors open at five PM.", "Doors open at six p.m.",
   "One of the exits is by the desk.", "No one is turned away.", "Come one hour before doors.", "Give it one try.", "It is a real treat.", "Parking is an euro.", "Parking is a dozen dollars.",
   "Tickets are X dollars.", "Parking is $\u2169.", "Tickets are \u5341 dollars.", "Tickets are \u58f9\u4f70 dollars.", "The XIV Summit.", "The XV Summit.", "Parking is $\u4e00\u3007.", "I think so, and see C or D.",
+  // Quantity expressions no word list contains, from review round 14 (B1 and B3). Before the check failed closed, every one
+  // of these was served as the model's own words with an ungrounded quantity in it, and the fuzz stayed green because the
+  // generator never wrote the strings. They are here so that it cannot stay green again.
+  "Parking is one buck.", "Parking is a couple of dollars.", "Parking is a few dollars.", "Parking is several dollars.", "Parking is a pair of dollars.", "Parking is a couple bucks.",
+  "Parking is one usd.", "Parking is one cent.", "Parking is one quid.", "Parking is a tenner.", "Parking is half a dollar.", "Parking is a handful of dollars.",
+  "The talk lasts half an hour.", "The talk lasts a couple of hours.", "Refunds up to a couple of hours.", "Refunds up to a few hours.", "Refunds up to several hours.",
+  "There is one exit.", "There are a couple of exits.", "A quarter of the seats are reserved.", "Doors open at one am.",
 ];
 function inScript(text: string, r: () => number): string {
   if (r() < 0.25) return text;
@@ -385,10 +446,22 @@ describe("grounding property: an ungrounded domain, email, host, number or numer
     expect(ungrounded("Parking is $\u0661\u0660\u0660.", NUMERIC_SOURCE)).toEqual(["#100"]);
     expect(ungrounded("Parking is $\u216d.", NUMERIC_SOURCE)).toEqual(["RC"]);
     expect(ungrounded("Tickets are \u5341 dollars.", NUMERIC_SOURCE)).toEqual(["N\u5341"]);
-    // number words in money/time context are numbers; in prose they are not
+    // quantities fail closed: "one" is the numeral outside its prose frames, an article before a unit is 1, and a word in a
+    // quantifier slot that no list can value is reported as itself
     expect(ungrounded("Parking is one dollar.", NUMERIC_SOURCE)).toEqual(["W1"]);
     expect(ungrounded("Parking is a dollar, at one pm.", NUMERIC_SOURCE)).toEqual(["W1", "W1"]);
-    expect(ungrounded("Parking is ten dollars. One of the exits; no one; give it one try.", NUMERIC_SOURCE)).toEqual([]);
+    expect(ungrounded("Parking is ten dollars. One of the exits; no one; one more thing.", NUMERIC_SOURCE)).toEqual([]);
+    expect(ungrounded("Parking is ten dollars, but give it one try.", NUMERIC_SOURCE)).toEqual(["W1"]);
+    expect(ungrounded("Parking is a couple of dollars.", NUMERIC_SOURCE)).toEqual(["Qcouple"]);
+    expect(ungrounded("Parking is several dollars.", NUMERIC_SOURCE)).toEqual(["Qseveral"]);
+    expect(ungrounded("Parking is a tenner.", NUMERIC_SOURCE)).toEqual(["Qtenner"]);
+    expect(ungrounded("There is one exit.", NUMERIC_SOURCE)).toEqual(["W1"]);
+    expect(ungrounded("The talk lasts half an hour.", NUMERIC_SOURCE)).toEqual(["W1"]);
+    // the source's own words license the same words back: a quantity it states, and an article it writes
+    expect(ungrounded("Refunds up to a couple of hours.", "Refunds up to a couple of hours.")).toEqual([]);
+    expect(ungrounded("Parking is a dollar.", "Parking is one dollar.")).toEqual([]);
+    // ...but an article in the SOURCE is not a price the answer may state as a figure
+    expect(ungrounded("Tickets cost $1.", "Tickets are $25. Members save a dollar.")).toEqual(["#1"]);
     expect(ungrounded("The XIV Summit, I think, and CIVIL MILD.", NUMERIC_SOURCE)).toEqual(["RXIV"]);
     // the host view does not fold other scripts' digits; UTS46 does map circled and fullwidth forms
     expect(ungrounded("Go to tickets\u0662026.example/vip", SOURCES[6])).not.toEqual([]);
