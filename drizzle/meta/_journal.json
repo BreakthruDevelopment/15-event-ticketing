@@ -43,6 +43,13 @@
       "when": 1794786039815,
       "tag": "0005_api-read-rate-kind",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794791100610,
+      "tag": "0006_faq-entry-version",
+      "breakpoints": true
     }
   ]
 }

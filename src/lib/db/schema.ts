@@ -447,12 +447,15 @@ export const faqEntry = pgTable(
     question: text("question").notNull(),
     answer: text("answer").notNull(),
     position: integer("position").notNull().default(0),
+    /** Optimistic concurrency for the editor: a stale `version` on update or delete is a 409 (15.5). */
+    version: integer("version").notNull().default(1),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex("faq_entry_event_ref_uidx").on(t.eventId, t.refNo),
     check("faq_entry_ref_chk", sql`${t.refNo} between 1 and 9999`),
+    check("faq_entry_version_chk", sql`${t.version} >= 1`),
     check("faq_entry_lengths_chk", sql`char_length(${t.question}) between 1 and 200 and char_length(${t.answer}) between 1 and 800`),
   ],
 );
