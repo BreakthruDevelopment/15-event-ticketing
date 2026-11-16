@@ -160,6 +160,13 @@ describe("time zones, ambiguous words and number words", () => {
     expect(chk("It is on March 3.", ["E1"]).mode).toBe("quoted");
     expect(chk("It is on 3 March.", ["E1"]).mode).toBe("quoted");
   });
+  it("WEST, IST, BST in capitals are zones only right after a time", () => {
+    expect(chk("We were told: WEST side entrance at 6:30 PM.", ["E1"]).mode).toBe("model");
+    expect(chk("Park on the WEST lot, then walk to IST hall.", ["E1"]).mode).toBe("model");
+    expect(chk("It starts at 7:00 PM WEST.", ["E1"]).mode).toBe("quoted");
+    expect(chk("It starts at 7 PM BST.", ["E1"]).mode).toBe("quoted");
+    expect(numberTokens("7:00 PM IST")).toContain("z:ist");
+  });
   it("'one hundred and twenty' is 120; 'five and ten' stays two numbers", () => {
     expect([...numberTokens("one hundred and twenty")]).toEqual(["120"]);
     expect([...numberTokens("two thousand and five")]).toEqual(["2005"]);

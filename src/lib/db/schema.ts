@@ -479,9 +479,12 @@ export const faqAsk = pgTable(
     mode: text("mode", { enum: FAQ_ASK_MODES }).notNull(),
     flags: text("flags").array().notNull().default(sql`'{}'::text[]`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`date_trunc('hour', now())`),
+    /** The exact UTC date of the ask: the per-event daily cap counts by it, so the hour-rounding of `created_at` can't move an ask across the day line. */
+    day: date("day").notNull().default(sql`(now() at time zone 'utc')::date`),
   },
   (t) => [
     index("faq_ask_event_hash_idx").on(t.eventId, t.qHash, t.faqVersion),
+    index("faq_ask_event_day_idx").on(t.eventId, t.day),
     index("faq_ask_created_idx").on(t.createdAt),
     check("faq_ask_status_chk", sql`${t.status} in (${list(FAQ_ASK_STATUSES)})`),
     check("faq_ask_mode_chk", sql`${t.mode} in (${list(FAQ_ASK_MODES)})`),
@@ -506,7 +509,7 @@ export const opLedger = pgTable(
     result: jsonb("result").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.actorId, t.clientOpId] })],
+  (t) => [primaryKey({ columns: [t.actorId, t.clientOpId] }), index("op_ledger_kind_created_idx").on(t.kind, t.createdAt)],
 );
 
 export type User = typeof user.$inferSelect;

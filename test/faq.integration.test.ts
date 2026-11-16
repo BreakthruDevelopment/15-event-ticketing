@@ -743,6 +743,108 @@ describe.skipIf(!url)("FAQ entries and the FAQ bot (Postgres)", () => {
       expect((await sql`select count(*)::int as n from faq_ask where event_id = ${ev.id} and 'pending' = any(flags)`)[0].n).toBe(0);
     });
 
+    it.each([["America/Chicago"], ["Asia/Calcutta"]])("the per-event day cap counts the exact UTC day, not the hour-rounded created_at (%s)", async (timeZone) => {
+      const ev = await mkEvent(org, { timeZone });
+      await add(ev, "Where do I park?", "Garage.");
+      const run = model(PARK);
+      const fill = (n: number, day: string, createdAt: string) =>
+        sql`insert into faq_ask (event_id, question, q_hash, faq_version, status, mode, day, created_at)
+            select ${ev.id}, 'q' || g, 'h' || g, 1, 'answered', 'model', ${day}::date, ${createdAt}::timestamptz from generate_series(1, ${n}::int) g`;
+      const today = (await sql`select (now() at time zone 'utc')::date::text as d`)[0].d as string;
+      const yesterday = (await sql`select ((now() at time zone 'utc')::date - 1)::text as d`)[0].d as string;
+      // 300 asks that belong to yesterday, stamped in yesterday's last hour or even "now": none counts today
+      await fill(150, yesterday, `${yesterday} 23:00:00+00`);
+      await fill(150, yesterday, `${yesterday} 23:30:00+00`);
+      await expect(ASK.askFaq(att, ev.id, q("Allowed today?"), { run })).resolves.toMatchObject({ status: "answered" });
+      const [mine] = await sql`select day::text as d from faq_ask where event_id = ${ev.id} and question = 'Allowed today?'`;
+      expect(mine.d).toBe(today);
+      // 299 asks of today, even if their rounded created_at fell into yesterday's last hour: the next is the 300th, the one after is refused
+      await sql`delete from faq_ask where event_id = ${ev.id}`;
+      await fill(299, today, `${yesterday} 23:30:00+00`);
+      await expect(ASK.askFaq(att, ev.id, q("The 300th?"), { run })).resolves.toMatchObject({ status: "answered" });
+      await expect(ASK.askFaq(att, ev.id, q("The 301st?"), { run })).rejects.toMatchObject({ status: 429 });
+    });
+
+    describe("a claim whose request died", () => {
+      const hang = () => vi.fn(() => new Promise(() => {})) as unknown as typeof generate;
+      const age = (opId: string, secs: number) => sql`update op_ledger set created_at = now() - make_interval(secs => ${secs}) where client_op_id = ${opId}`;
+      const tick = () => sleep(150);
+
+      it("inside the lease a retry is 409 retry and calls no model; after it, the retry takes over without a second charge", async () => {
+        const ev = await withParking();
+        const body = q("Where can I leave my car?");
+        void ASK.askFaq(att, ev.id, body, { run: hang() }); // never answers: the request "died"
+        await tick();
+        expect(await count("", att.id, "ai")).toBe(1);
+        const run = model(PARK);
+        await expect(ASK.askFaq(att, ev.id, body, { run })).rejects.toMatchObject({ status: 409, code: "retry" });
+        expect(run).not.toHaveBeenCalled();
+        await age(body.clientOpId, 60);
+        await expect(ASK.askFaq(att, ev.id, body, { run })).rejects.toMatchObject({ status: 409, code: "retry" });
+        await age(body.clientOpId, 130);
+        const r = await ASK.askFaq(att, ev.id, body, { run });
+        expect(r).toMatchObject({ status: "answered", mode: "model", replayed: false });
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(await count("", att.id, "ai")).toBe(1);
+        expect(await dailyAi()).toBe(1);
+        const rows = await askRows(ev.id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].flags).not.toContain("pending");
+        expect(rows[0]).toMatchObject({ status: "answered", answer: PARK.answer });
+        // and now it is a normal replay
+        expect(await ASK.askFaq(att, ev.id, body, { run })).toMatchObject({ replayed: true, text: PARK.answer });
+        expect(run).toHaveBeenCalledTimes(1);
+      });
+
+      it("parallel retries after the lease: exactly one takes over and calls the model", async () => {
+        const ev = await withParking();
+        const body = q("Where can I leave my car?");
+        void ASK.askFaq(att, ev.id, body, { run: hang() });
+        await tick();
+        await age(body.clientOpId, 200);
+        const run = model(PARK, 80);
+        const out = await Promise.allSettled([ASK.askFaq(att, ev.id, body, { run }), ASK.askFaq(att, ev.id, body, { run }), ASK.askFaq(att, ev.id, body, { run })]);
+        expect(out.filter((o) => o.status === "fulfilled")).toHaveLength(1);
+        for (const o of out) if (o.status === "rejected") expect(o.reason).toMatchObject({ status: 409, code: "retry" });
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(await count("", att.id, "ai")).toBe(1);
+        expect(await askRows(ev.id)).toHaveLength(1);
+      });
+
+      it("a taken-over ask that fails gives the original charge back; an organiser's try takes over too", async () => {
+        const ev = await withParking();
+        const body = q("Where can I leave my car?");
+        void ASK.askFaq(att, ev.id, body, { run: hang() });
+        await tick();
+        await age(body.clientOpId, 200);
+        const broken = vi.fn(async () => {
+          throw new AiError("down", "provider", 503);
+        }) as unknown as typeof generate;
+        await expect(ASK.askFaq(att, ev.id, body, { run: broken })).rejects.toBeInstanceOf(AiError);
+        expect(await count("", att.id, "ai")).toBe(0);
+        expect(await dailyAi()).toBe(0);
+        expect(await askRows(ev.id)).toHaveLength(0);
+        expect(await ASK.askFaq(att, ev.id, body, { run: model(PARK) })).toMatchObject({ status: "answered" });
+        const own = q("Owner try?");
+        void ASK.askFaq(org, ev.id, own, { run: hang() });
+        await tick();
+        await age(own.clientOpId, 200);
+        expect(await ASK.askFaq(org, ev.id, own, { run: model(PARK) })).toMatchObject({ status: "answered" });
+        expect(await count("", org.id, "ai")).toBe(1);
+      });
+
+      it("a stale claim for a different question is still op_id_reused, and a takeover re-checks the event (hidden is 404)", async () => {
+        const ev = await withParking();
+        const body = q("Where can I leave my car?");
+        void ASK.askFaq(att, ev.id, body, { run: hang() });
+        await tick();
+        await age(body.clientOpId, 200);
+        await expect(ASK.askFaq(att, ev.id, { ...body, question: "Another?" }, { run: model(PARK) })).rejects.toMatchObject({ code: "op_id_reused" });
+        await sql`update event set hidden_at = now(), hidden_reason = 'x' where id = ${ev.id}`;
+        await expect(ASK.askFaq(att, ev.id, body, { run: model(PARK) })).rejects.toMatchObject({ status: 404 });
+      });
+    });
+
     it("the app-wide daily cap (AI_DAILY_CAP) is 429 and refunds the user's allowance", async () => {
       const ev = await withParking();
       await sql`delete from daily_usage where kind = 'ai' and day = (now() at time zone 'utc')::date`;

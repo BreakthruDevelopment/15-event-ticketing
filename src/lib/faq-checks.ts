@@ -114,7 +114,9 @@ const NUM_WORD = `(?:${[...Object.keys(SMALL), "hundred", "thousand"].join("|")}
 const NUM_WORDS_RE = new RegExp(`\\b${NUM_WORD}(?:[\\s-]+${NUM_WORD}|(?<=hundred|thousand)\\s+and\\s+${NUM_WORD})*\\b`, "g");
 
 const ZONE_FAMILY: Record<string, string> = { est: "eastern", edt: "eastern", cst: "central", cdt: "central", mst: "mountain", mdt: "mountain", pst: "pacific", pdt: "pacific", akst: "alaska", akdt: "alaska", hst: "hawaii" };
-const ZONE_ABBR = /\b(EST|EDT|CST|CDT|MST|MDT|PST|PDT|AKST|AKDT|HST|UTC|GMT|BST|CET|CEST|EET|EEST|IST|JST|KST|AEST|AEDT|NZST|NZDT|WET|WEST)\b(?!\s?[+-]\d)/g;
+const ZONE_ABBR = /\b(EST|EDT|CST|CDT|MST|MDT|PST|PDT|AKST|AKDT|HST|UTC|GMT|CET|CEST|EEST|JST|KST|AEST|AEDT|NZST|NZDT)\b(?!\s?[+-]\d)/g;
+// These double as ordinary words or names in capitals ("WEST", "IST", "BST", "WET", "EET"): a zone only right after a time.
+const ZONE_ABBR_AFTER_TIME = /(?<=(?:\d|[aApP]\.?[mM]\.?)\s?)\b(BST|IST|WET|WEST|EET)\b(?!\s?[+-]\d)/g;
 const ZONE_OFFSET = /\b(?:GMT|UTC)\s?([+-])(\d{1,2})(?::?(\d{2}))?/gi;
 const ZONE_NAMED = /\b(eastern|central|mountain|pacific|alaska|hawaii)(?:[- ]aleutian)?\s+(?:standard\s+|daylight\s+)?time\b/gi;
 
@@ -130,6 +132,7 @@ function zoneTokens(input: string, out: Set<string>) {
     else out.add(`z:${z}`);
     if (ZONE_FAMILY[z]) out.add(`z:${ZONE_FAMILY[z]}`);
   }
+  for (const m of input.matchAll(ZONE_ABBR_AFTER_TIME)) out.add(`z:${m[1].toLowerCase()}`);
   for (const m of input.matchAll(ZONE_OFFSET)) out.add(`z:gmt${m[1]}${Number(m[2])}:${m[3] ?? "00"}`);
   for (const m of input.matchAll(ZONE_NAMED)) out.add(`z:${m[1].toLowerCase()}`);
 }

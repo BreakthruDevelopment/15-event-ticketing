@@ -50,6 +50,13 @@
       "when": 1794791100610,
       "tag": "0006_faq-entry-version",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794799404265,
+      "tag": "0007_faq-ask-day",
+      "breakpoints": true
     }
   ]
 }

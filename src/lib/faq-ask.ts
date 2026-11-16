@@ -146,13 +146,24 @@ async function readLedger(reader: Pick<Db, "select">, actorId: string, opId: str
 /** What a cache-hit ask leaves in the ledger: a pointer to the `faq_ask` row it was served from, never the text. */
 type CacheRef = { ref: string };
 
-/** The first answer for this op id (or, for a cache hit, the pointer to it), or the error that says why there isn't one. */
-function interpret(first: typeof L.$inferSelect, hash: string): AskResponse | CacheRef {
+/** A claim (op-ledger row with no answer yet) older than this is taken over by a retry: far past `AI_TIMEOUT_MS`, so its request is dead. */
+const LEASE_SECONDS = 120;
+type Expired = { expired: true };
+const isPending = (result: unknown) => result === null || (typeof result === "object" && result !== null && "claim" in result);
+
+/**
+ * The first answer for this op id (or, for a cache hit, the pointer to it; or `expired` for a claim whose request died
+ * mid-ask), or the error that says why there isn't one: 409 `op_id_reused`, or 409 `retry` for a claim still inside its lease.
+ */
+function interpret(first: typeof L.$inferSelect, hash: string): AskResponse | CacheRef | Expired {
   if (first.kind !== KIND || first.payloadHash !== hash) {
     throw new CodedConflictError("op_id_reused", "That request id was already used for a different request.");
   }
-  if (first.result) return first.result as unknown as AskResponse | CacheRef;
-  throw new CodedConflictError("retry", "That question is still being answered. Try again in a moment.");
+  if (isPending(first.result)) {
+    if (Date.now() - first.createdAt.getTime() >= LEASE_SECONDS * 1000) return { expired: true };
+    throw new CodedConflictError("retry", STILL_RUNNING);
+  }
+  return first.result as unknown as AskResponse | CacheRef;
 }
 
 const STILL_RUNNING = "That question is still being answered. Try again in a moment.";
@@ -285,18 +296,42 @@ async function claim(actor: Actor, snap: Snapshot, data: { question: string; cli
     const role = await lockActor(tx, actor, rolesFor("faq:ask"));
     const [mine] = await tx
       .insert(L)
-      .values({ actorId: actor.id, clientOpId: data.clientOpId, kind: KIND, payloadHash: hash })
+      .values({ actorId: actor.id, clientOpId: data.clientOpId, kind: KIND, payloadHash: hash, result: { claim: null } })
       .onConflictDoNothing()
       .returning({ id: L.clientOpId });
+    // When this op id already has a claim whose request died (no answer within the lease), the retry takes it over: the
+    // conditional update lets exactly one retry win, and the winner inherits the original charge, the daily slot and the
+    // placeholder row, so nothing is charged twice.
+    let resume: { askId: string | null } | null = null;
     if (!mine) {
       const first = await readLedger(tx, actor.id, data.clientOpId);
       if (!first) throw new CodedConflictError("retry", STILL_RUNNING);
       const prior = interpret(first, hash);
-      // A pointer to a cached answer here is a parallel duplicate of a cache-hit ask: let the caller resolve it.
-      if ("ref" in prior) throw new CodedConflictError("retry", STILL_RUNNING);
-      return { replay: prior };
+      if ("expired" in prior) {
+        const [taken] = await tx
+          .update(L)
+          .set({ createdAt: sql`now()` })
+          .where(
+            and(
+              eq(L.actorId, actor.id),
+              eq(L.clientOpId, data.clientOpId),
+              eq(L.kind, KIND),
+              eq(L.payloadHash, hash),
+              sql`(${L.result} is null or jsonb_exists(${L.result}, 'claim'))`,
+              sql`${L.createdAt} < now() - make_interval(secs => ${LEASE_SECONDS})`,
+            ),
+          )
+          .returning({ result: L.result });
+        if (!taken) throw new CodedConflictError("retry", STILL_RUNNING);
+        resume = { askId: (taken.result as { claim?: string | null } | null)?.claim ?? null };
+      } else if ("ref" in prior) {
+        // A pointer to a cached answer here is a parallel duplicate of a cache-hit ask: let the caller resolve it.
+        throw new CodedConflictError("retry", STILL_RUNNING);
+      } else {
+        return { replay: prior };
+      }
     }
-    await consumeRate(tx, actor.id, "ai", FAQ_LIMITS.asksPerHour, TOO_MANY_ASKS);
+    if (!resume) await consumeRate(tx, actor.id, "ai", FAQ_LIMITS.asksPerHour, TOO_MANY_ASKS);
     await advisoryLock(tx, `faq-ask:${eventId}`);
     // The event as it is NOW (the snapshot is a few milliseconds old): hidden or cancelled in between is refused here.
     const [ev] = await tx
@@ -307,18 +342,21 @@ async function claim(actor: Actor, snap: Snapshot, data: { question: string; cli
     if (!ev) throw new NotFoundError();
     const owner = role === "organizer" && ev.organizerId === actor.id;
     gate(ev, owner);
+    if (resume) return resume;
     let askId: string | null = null;
     if (!owner) {
+      // Counted by the exact UTC day stored at insert, not by the hour-rounded created_at.
       const [{ n }] = await tx
         .select({ n: count() })
         .from(A)
-        .where(and(eq(A.eventId, eventId), sql`${A.createdAt} >= (date_trunc('day', now() at time zone 'utc') at time zone 'utc') - interval '1 hour'`));
+        .where(and(eq(A.eventId, eventId), sql`${A.day} = (now() at time zone 'utc')::date`));
       if (n >= FAQ_LIMITS.asksPerEventPerDay) throw new TooManyRequestsError(EVENT_ASKS_CAPPED);
       const [row] = await tx
         .insert(A)
         .values({ eventId, question: data.question, qHash, faqVersion: snap.event.faqVersion, status: "not_in_faq", citations: [], mode: "model", flags: ["pending"], createdAt: hourInZone(snap.event.timeZone) })
         .returning({ id: A.id });
       askId = row.id;
+      await tx.update(L).set({ result: { claim: askId } }).where(and(eq(L.actorId, actor.id), eq(L.clientOpId, data.clientOpId)));
     }
     if (!(await reserveDaily(tx, "ai", env().AI_DAILY_CAP))) throw new TooManyRequestsError(BOT_BUSY);
     return { askId };
@@ -329,7 +367,7 @@ async function claim(actor: Actor, snap: Snapshot, data: { question: string; cli
 async function abandon(actor: Actor, askId: string | null, opId: string): Promise<void> {
   try {
     await db().transaction(async (tx) => {
-      await tx.delete(L).where(and(eq(L.actorId, actor.id), eq(L.clientOpId, opId), sql`${L.result} is null`));
+      await tx.delete(L).where(and(eq(L.actorId, actor.id), eq(L.clientOpId, opId), sql`(${L.result} is null or jsonb_exists(${L.result}, 'claim'))`));
       if (askId) await tx.delete(A).where(eq(A.id, askId));
       await releaseRate(tx, actor.id, "ai");
       await releaseDaily(tx, "ai");
@@ -356,21 +394,28 @@ export async function askFaq(actor: Actor | null, rawEventId: string, input: unk
   const hash = opHash(`${eventId}\n${data.question}`);
   const sources = buildSources(snap);
   const prior = await readLedger(db(), actor.id, data.clientOpId);
+  let takeOver = false;
   if (prior) {
     const first = interpret(prior, hash);
-    if (!("ref" in first)) return { ...first, replayed: true };
-    const again = await resolveRef(first, snap, sources);
-    if (again) return { ...again, replayed: true };
-    await forgetRef(actor.id, data.clientOpId);
+    if ("expired" in first) {
+      takeOver = true;
+    } else if (!("ref" in first)) {
+      return { ...first, replayed: true };
+    } else {
+      const again = await resolveRef(first, snap, sources);
+      if (again) return { ...again, replayed: true };
+      await forgetRef(actor.id, data.clientOpId);
+    }
   }
 
   const qHash = qHashOf(data.question);
-  if (!sessionOwner) {
+  if (!sessionOwner && !takeOver) {
     const cached = await findCached(snap, qHash, sources);
     if (cached) {
       const dup = await recordCacheHit(actor, data.clientOpId, hash, cached.askId, snap.event.faqVersion);
       if (!dup) return { ...cached.response, replayed: false };
       const first = interpret(dup, hash);
+      if ("expired" in first) throw new CodedConflictError("retry", STILL_RUNNING);
       if ("ref" in first) {
         const again = await resolveRef(first, snap, sources);
         if (again) return { ...again, replayed: true };
