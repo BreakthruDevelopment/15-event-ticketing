@@ -44,6 +44,17 @@ if a role is widened later. `update` lets an admin change another user's name an
 Tests: `test/admin-permissions.integration.test.ts`. Don't add these permissions back; apps promise that admins
 see counts only.
 
+## Tickets, QR codes and door codes
+
+A ticket's QR text is `ET1:` plus 56 Crockford base32 characters: a version byte, the ticket id, a reissue counter
+(`qr_epoch`) and a 128-bit HMAC-SHA256 tag, with no name, email or event id in it (`src/lib/tickets/token.ts`). The keys
+are derived with HKDF from `BETTER_AUTH_SECRET` (`src/lib/tickets/keys.ts`); nothing is stored but the ticket id, the epoch
+and a keyed digest of the typed door code. **Rotating `BETTER_AUTH_SECRET` makes every QR and door code stop verifying**
+(and signs everyone out, and kills open staff-invite links): attendees open their ticket page, reissue, and the new code
+works. The database, not the signature, decides whether a scan is valid: a reissue, a cancel or a void takes effect on the
+next scan. Tickets are rendered by `qrSvg` (`uqr` 0.1.3, pinned, MIT, version 3-M, alphanumeric mode). `/tickets/*` and
+`/door/*` carry a nonce-based Content Security Policy from `src/proxy.ts`.
+
 ## Run locally
 
 ```bash

@@ -216,6 +216,102 @@ echo "$BODY" | jq -e --arg id "$EVENT_ID" '.events | map(.id) | index($id) == nu
 req "$JAR_B" GET "/api/organizer/events/$EVENT_ID/staff"; expect 403 "staff on the organiser's staff list"
 pass "invite works once and answers the same for unknown and used tokens; removal closes the door"
 
+# ---------------------------------------------------------------------------
+# Registration, capacity and tickets (spec 15.2): A and B take the two seats, C is turned away, tickets are private,
+# a reissue kills the old QR text, a cancel gives a seat back, the organiser's guest list and void move the count.
+# ---------------------------------------------------------------------------
+req /dev/null GET "/api/events/by-slug/$SLUG"; expect 200 "event by slug for registration"
+TYPE_ID=$(echo "$BODY" | jq -r '.ticketTypes[0].id')
+REG_A_OP="$(uuid)"
+REG_A="{\"ticketTypeId\":\"$TYPE_ID\",\"quantity\":1,\"clientOpId\":\"$REG_A_OP\"}"
+req /dev/null POST "/api/events/$EVENT_ID/register" "$REG_A"; expect 401 "registering signed out"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -H 'content-type: application/json' -d "$REG_A" "$BASE_URL/api/events/$EVENT_ID/register")
+[ "$code" = "403" ] || fail "registering without an Origin should be 403, got $code"
+req "$JAR_A" POST "/api/events/$EVENT_ID/register" "{\"ticketTypeId\":\"$TYPE_ID\",\"quantity\":1,\"clientOpId\":\"nul\\u0000byte\"}"; expect 400 "a NUL byte in a client op id"
+req "$JAR_A" POST "/api/events/$EVENT_ID/register" "$REG_A"; expect 201 "A registers"
+TICKET_A=$(echo "$BODY" | jq -r '.tickets[0].id'); REG_A_ID=$(echo "$BODY" | jq -r '.registration.id')
+echo "$BODY" | grep -q 'ET1:' && fail "the registration response must not carry a QR text: $BODY"
+req "$JAR_A" POST "/api/events/$EVENT_ID/register" "$REG_A"; expect 200 "A's replayed registration"
+[ "$(echo "$BODY" | jq -r '.tickets[0].id')" = "$TICKET_A" ] && [ "$(echo "$BODY" | jq -r '.replayed')" = "true" ] || fail "a replayed registration must return the same ticket: $BODY"
+req "$JAR_A" POST "/api/events/$EVENT_ID/register" "{\"ticketTypeId\":\"$TYPE_ID\",\"quantity\":1,\"clientOpId\":\"$(uuid)\"}"; expect 409 "A registering twice"
+[ "$(echo "$BODY" | jq -r '.code')" = "already_registered" ] || fail "expected already_registered: $BODY"
+req "$JAR_A" POST "/api/events/$EVENT_ID/register" "{\"ticketTypeId\":\"$TYPE_ID\",\"quantity\":2,\"clientOpId\":\"$REG_A_OP\"}"; expect 409 "an op id reused for another request"
+[ "$(echo "$BODY" | jq -r '.code')" = "op_id_reused" ] || fail "expected op_id_reused: $BODY"
+req "$JAR_B" POST "/api/events/$EVENT_ID/register" "{\"ticketTypeId\":\"$TYPE_ID\",\"quantity\":1,\"clientOpId\":\"$(uuid)\"}"; expect 201 "B registers"
+TICKET_B=$(echo "$BODY" | jq -r '.tickets[0].id'); REG_B_ID=$(echo "$BODY" | jq -r '.registration.id')
+req "$JAR_C" POST "/api/events/$EVENT_ID/register" "{\"ticketTypeId\":\"$TYPE_ID\",\"quantity\":1,\"clientOpId\":\"$(uuid)\"}"; expect 409 "C on a sold-out event"
+[ "$(echo "$BODY" | jq -r '.code')" = "sold_out" ] || fail "expected sold_out: $BODY"
+req /dev/null GET "/api/events/by-slug/$SLUG"
+[ "$(echo "$BODY" | jq -r '.ticketTypes[0].seatsLeft')" = "0" ] || fail "expected 0 seats left: $BODY"
+pass "A and B registered, a retry returned the same ticket, C got sold_out"
+
+req /dev/null GET "/api/tickets/$TICKET_A"; expect 401 "a ticket signed out"
+req "$JAR_B" GET "/api/tickets/$TICKET_A"; expect 404 "B reading A's ticket"
+req "$JAR_O" GET "/api/tickets/$TICKET_A"; expect 404 "the organiser reading A's ticket"
+req "$JAR_B" POST "/api/tickets/$TICKET_A/reissue" "{\"clientOpId\":\"$(uuid)\"}"; expect 404 "B reissuing A's ticket"
+hdrs=$(curl -s -D - -o "$RESP" -b "$JAR_A" "$BASE_URL/api/tickets/$TICKET_A")
+echo "$hdrs" | grep -qi '^cache-control:.*no-store' || fail "the ticket response must be no-store: $hdrs"
+echo "$hdrs" | grep -qi '^referrer-policy: no-referrer' || fail "the ticket response must send no-referrer: $hdrs"
+BODY=$(cat "$RESP")
+QR_A=$(echo "$BODY" | jq -r '.qrText'); CODE_A=$(echo "$BODY" | jq -r '.doorCode')
+echo "$QR_A" | grep -Eq '^ET1:[0-9A-HJKMNP-TV-Z]{56}$' || fail "A's QR text has the wrong shape (the QR text is not echoed here)"
+echo "$CODE_A" | grep -Eq '^[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}$' || fail "A's door code has the wrong shape"
+req "$JAR_A" GET /api/tickets; expect 200 "A's ticket list"
+[ "$(echo "$BODY" | jq '.tickets | length')" = "1" ] || fail "A should see one ticket: $BODY"
+echo "$BODY" | grep -q 'ET1:' && fail "the ticket list must not carry a QR text"
+pass "tickets are private to their holder: QR text and door code only on the holder's own ticket, no-store"
+
+REISSUE_OP="$(uuid)"
+req "$JAR_A" POST "/api/tickets/$TICKET_A/reissue" "{\"clientOpId\":\"$REISSUE_OP\"}"; expect 200 "A reissues"
+QR_A2=$(echo "$BODY" | jq -r '.ticket.qrText'); CODE_A2=$(echo "$BODY" | jq -r '.ticket.doorCode')
+[ "$QR_A2" != "$QR_A" ] && [ "$CODE_A2" != "$CODE_A" ] && [ "$(echo "$BODY" | jq -r '.ticket.qrEpoch')" = "2" ] || fail "a reissue must change the QR text, the door code and the epoch"
+req "$JAR_A" POST "/api/tickets/$TICKET_A/reissue" "{\"clientOpId\":\"$REISSUE_OP\"}"; expect 200 "A's replayed reissue"
+[ "$(echo "$BODY" | jq -r '.ticket.qrText')" = "$QR_A2" ] && [ "$(echo "$BODY" | jq -r '.replayed')" = "true" ] || fail "a replayed reissue must return the current ticket"
+pass "reissue changes the QR text and door code; a retry doesn't reissue again"
+
+req "$JAR_A" DELETE "/api/registrations/$REG_A_ID" "{\"clientOpId\":\"$(uuid)\"}"; expect 200 "A cancels"
+[ "$(echo "$BODY" | jq -r '.changed')" = "true" ] && [ "$(echo "$BODY" | jq -r '.released')" = "1" ] || fail "cancel should release one seat: $BODY"
+req "$JAR_A" DELETE "/api/registrations/$REG_A_ID" "{\"clientOpId\":\"$(uuid)\"}"; expect 200 "A cancels again"
+[ "$(echo "$BODY" | jq -r '.changed')" = "false" ] || fail "a second cancel must change nothing: $BODY"
+req "$JAR_B" DELETE "/api/registrations/$REG_A_ID" "{\"clientOpId\":\"$(uuid)\"}"; expect 404 "B cancelling A's registration"
+req /dev/null GET "/api/events/by-slug/$SLUG"
+[ "$(echo "$BODY" | jq -r '.ticketTypes[0].seatsLeft')" = "1" ] || fail "expected 1 seat left after the cancel: $BODY"
+req "$JAR_A" GET "/api/tickets/$TICKET_A"; expect 200 "A's cancelled ticket"
+[ "$(echo "$BODY" | jq -r '.status')" = "cancelled" ] && [ "$(echo "$BODY" | jq -r '.qrText')" = "null" ] || fail "a cancelled ticket must show no QR text: $BODY"
+req "$JAR_C" POST "/api/events/$EVENT_ID/register" "{\"ticketTypeId\":\"$TYPE_ID\",\"quantity\":1,\"clientOpId\":\"$(uuid)\"}"; expect 201 "C takes the freed seat"
+REG_C_ID=$(echo "$BODY" | jq -r '.registration.id')
+pass "cancel gives the seat back exactly once; C registers into it"
+
+req "$JAR_O" GET "/api/organizer/events/$EVENT_ID/attendees"; expect 200 "attendee list"
+[ "$(echo "$BODY" | jq '.total')" = "3" ] || fail "expected 3 tickets (A cancelled, B and C valid): $BODY"
+echo "$BODY" | jq -e '.attendees | map(select(.status == "valid")) | length == 2 and all(.email != null)' >/dev/null || fail "the organiser should see two valid attendees with emails: $BODY"
+echo "$BODY" | grep -q 'ET1:' && fail "the attendee list must not carry a QR text"
+req "$JAR_A" GET "/api/organizer/events/$EVENT_ID/attendees"; expect 403 "an attendee on the attendee list"
+req "$JAR_O" POST "/api/organizer/events/$EVENT_ID/guests" "{\"ticketTypeId\":\"$TYPE_ID\",\"guests\":[{\"name\":\"Walk In\"}],\"clientOpId\":\"$(uuid)\"}"; expect 409 "a guest on a full event"
+[ "$(echo "$BODY" | jq -r '.code')" = "sold_out" ] || fail "expected sold_out for the guest: $BODY"
+req "$JAR_O" POST "/api/organizer/events/$EVENT_ID/tickets/$TICKET_B/void" "{\"clientOpId\":\"$(uuid)\"}"; expect 200 "the organiser voids B's ticket"
+[ "$(echo "$BODY" | jq -r '.registrationCancelled')" = "true" ] || fail "voiding B's only ticket should cancel the registration: $BODY"
+req "$JAR_O" POST "/api/organizer/events/$EVENT_ID/tickets/$TICKET_B/void" "{\"clientOpId\":\"$(uuid)\"}"; expect 409 "voiding B's ticket twice"
+GUEST_OP="$(uuid)"
+GUEST_JSON="{\"ticketTypeId\":\"$TYPE_ID\",\"guests\":[{\"name\":\"Walk In\"}],\"clientOpId\":\"$GUEST_OP\"}"
+req "$JAR_O" POST "/api/organizer/events/$EVENT_ID/guests" "$GUEST_JSON"; expect 201 "a guest on the freed seat"
+GUEST_QR=$(echo "$BODY" | jq -r '.tickets[0].qrText')
+echo "$GUEST_QR" | grep -Eq '^ET1:[0-9A-HJKMNP-TV-Z]{56}$' || fail "the guest ticket needs a QR text for the organiser to hand on"
+req "$JAR_O" POST "/api/organizer/events/$EVENT_ID/guests" "$GUEST_JSON"; expect 200 "a replayed guest"
+[ "$(echo "$BODY" | jq -r '.tickets[0].qrText')" = "$GUEST_QR" ] || fail "a replayed guest request must return the same ticket"
+req /dev/null GET "/api/events/by-slug/$SLUG"
+[ "$(echo "$BODY" | jq -r '.ticketTypes[0].seatsLeft')" = "0" ] || fail "expected 0 seats left after the guest: $BODY"
+pass "the organiser's attendee list, void and guest list move the seat count and never expose an attendee's QR"
+
+req "$JAR_C" DELETE "/api/registrations/$REG_C_ID" "{\"clientOpId\":\"$(uuid)\"}"; expect 200 "C cancels"
+csp1=$(curl -s -D - -o /dev/null "$BASE_URL/tickets/smoke-$RUN_ID" | grep -i '^content-security-policy:' || true)
+csp2=$(curl -s -D - -o /dev/null "$BASE_URL/door/smoke-$RUN_ID" | grep -i '^content-security-policy:' || true)
+for csp in "$csp1" "$csp2"; do
+  echo "$csp" | grep -q "'nonce-" && echo "$csp" | grep -q "'strict-dynamic'" && echo "$csp" | grep -q "frame-ancestors 'none'" || fail "/tickets and /door must carry the nonce CSP: $csp"
+done
+[ "$(echo "$csp1" | grep -o "nonce-[^']*")" != "$(echo "$csp2" | grep -o "nonce-[^']*")" ] || fail "the CSP nonce must be fresh per request"
+pass "/tickets and /door carry a per-request nonce CSP"
+
 if [ -n "${SMOKE_ADMIN_EMAIL:-}" ] && [ -n "${SMOKE_ADMIN_PASSWORD:-}" ]; then
   post_auth "$JAR_ADM" /api/auth/sign-in/email "{\"email\":\"$SMOKE_ADMIN_EMAIL\",\"password\":\"$SMOKE_ADMIN_PASSWORD\"}" || fail "admin sign-in failed"
   req "$JAR_ADM" GET /api/admin/stats; expect 200 "admin stats"
@@ -226,6 +322,7 @@ if [ -n "${SMOKE_ADMIN_EMAIL:-}" ] && [ -n "${SMOKE_ADMIN_PASSWORD:-}" ]; then
   req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" '{"hidden":true,"reason":"smoke test"}'; expect 400 "hiding without a client op id"
   req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" "{\"hidden\":true,\"reason\":\"smoke test\",\"clientOpId\":\"$(uuid)\"}"; expect 200 "hide"
   req /dev/null GET "/api/events/by-slug/$SLUG"; expect 404 "a hidden event on the public page"
+  req "$JAR_A" POST "/api/events/$EVENT_ID/register" "{\"ticketTypeId\":\"$TYPE_ID\",\"quantity\":1,\"clientOpId\":\"$(uuid)\"}"; expect 404 "registering for a hidden event"
   UNHIDE_OP="$(uuid)"
   req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" "{\"hidden\":false,\"clientOpId\":\"$UNHIDE_OP\"}"; expect 200 "unhide"
   req "$JAR_ADM" POST "/api/admin/events/$EVENT_ID/hide" "{\"hidden\":false,\"clientOpId\":\"$UNHIDE_OP\"}"; expect 200 "replayed unhide"
