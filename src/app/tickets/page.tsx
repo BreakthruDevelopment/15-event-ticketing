@@ -33,7 +33,7 @@ const columns: Column<Row>[] = [
   {
     key: "when",
     header: "When",
-    cell: (row) => <span className="break-words">{formatEventWhen(row.event.startsAt, row.event.endsAt, row.event.timeZone)}</span>,
+    cell: (row) => <span className="[overflow-wrap:anywhere]">{formatEventWhen(row.event.startsAt, row.event.endsAt, row.event.timeZone)}</span>,
   },
   {
     key: "holder",

@@ -60,11 +60,17 @@ for path in / /sign-in; do
 done
 pass "pages render inside the shared shell"
 
-for path in /dashboard /admin /tickets /staff-invite; do
+for path in /dashboard /admin /tickets; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL$path")
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
-pass "signed-out dashboard, admin, tickets and staff invite redirect"
+pass "signed-out dashboard, admin and tickets redirect"
+
+# The staff invite page must NOT redirect a signed-out visitor: the invite code is in the URL fragment, which a redirect
+# followed by a client-side navigation would drop. The visitor signs in or up on the page itself.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/staff-invite")
+[ "$code" = "200" ] || fail "signed-out /staff-invite should render in place (200), got $code"
+pass "signed-out staff invite renders in place instead of redirecting"
 
 # Better Auth allows 3 sign-in/sign-up requests per 10 s per IP. Back-to-back runs (smoke right after seeding, or two
 # users in a row) can hit it. On a 429, wait out the window and retry once.

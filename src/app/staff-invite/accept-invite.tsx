@@ -1,6 +1,7 @@
 "use client";
 
 import { useSyncExternalStore, useState } from "react";
+import { SignInForm } from "@/app/sign-in/sign-in-form";
 import { buttonPrimary } from "@/components/ui/styles";
 import { useAsyncAction } from "@/lib/use-async-action";
 import { acceptInviteAction } from "./actions";
@@ -26,11 +27,13 @@ function hashOnServer() {
  * The token is read from `location.hash` after the page loads. It is posted in the action body, then
  * `replaceState` removes the fragment. It is never copied into a path, a query string, or the rendered text.
  */
-export function AcceptInvite() {
+export function AcceptInvite({ signedIn }: { signedIn: boolean }) {
   const hash = useSyncExternalStore(subscribeToHash, hashInBrowser, hashOnServer);
   const fragment: FragmentToken = tokenFromHash(hash);
   const [accepted, setAccepted] = useState<Accepted | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [justSignedIn, setJustSignedIn] = useState(false);
+  const authed = signedIn || justSignedIn;
 
   const token = fragment.status === "ok" ? fragment.token : null;
   const { run, pending, error: thrown } = useAsyncAction(async () => {
@@ -77,6 +80,23 @@ export function AcceptInvite() {
       <p className="text-sm text-muted">
         Open the invite link from the organiser. The code stays after the # in that link, and this page reads it in your browser.
       </p>
+    );
+  }
+
+  if (!authed) {
+    // A signed-out recipient (a new door-staff member has no account yet) signs in or up right here. Leaving the page
+    // would drop the fragment, so the form stays in place and the invite is accepted as soon as the session exists.
+    return (
+      <div className="space-y-4">
+        <h2 className="font-display text-2xl font-semibold">Sign in to join the door team</h2>
+        <p className="text-sm text-muted">Use your account, or create one. You will join the door team as soon as you are signed in.</p>
+        <SignInForm
+          onSuccess={async () => {
+            setJustSignedIn(true);
+            await run();
+          }}
+        />
+      </div>
     );
   }
 
