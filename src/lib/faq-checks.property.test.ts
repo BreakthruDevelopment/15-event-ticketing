@@ -75,9 +75,19 @@ function ungrounded(answer: string, source: string): string[] {
     const t = m[0].replace(/[.,;:!?)\]>'"\u2019\u201d\u2039*_]+$/g, "").replace(/\/$/, "");
     if (t && !s.includes(t)) found.push(t);
   }
+  // A path/query is compared as written: if reading it the way a browser reads a host (folding, dropping invisibles) would
+  // change it, the answer has changed what a browser keeps.
+  for (const token of answer.split(/\s+/)) {
+    if (!LINKISH.test(view(token))) continue;
+    const at = token.indexOf("://");
+    const rest = token.slice(at < 0 ? 0 : at + 3);
+    const cut = rest.search(/[/?#]/);
+    const tail = cut < 0 ? "" : rest.slice(cut);
+    if (tail && view(tail) !== tail.toLowerCase()) found.push(`~${tail}`);
+  }
   const sourceRuns = new Set(s.match(/[0-9]+/g) ?? []);
   for (const run of a.match(/[0-9]+/g) ?? []) if (!sourceRuns.has(run)) found.push(`#${run}`);
-  return found.filter((f) => f.startsWith("#") || !s.includes(f));
+  return found.filter((f) => f.startsWith("#") || f.startsWith("~") || !s.includes(f));
 }
 
 const NUMERIC_SOURCE = "Parking is $10. Doors open at 9:30 PM CST on December 4. Call 512-555-9999. Refunds up to 2 hours.";
@@ -99,7 +109,7 @@ const HOSTS = [
   "evil@austinproductmeetup.example", "hello@evil.test", "localhost", "10.0.0.1", "evil",
 ];
 const WRAPS = ["", "(", "[", "<", "‹", "“", "**", "_", "[x](", "see:", "see/", "see(", "tickets—", "\\", "//", "x", "mailto:", "https://", "http://", "HTTPS://", "xhttps://", "www.", "ftp://", "https://user@", "https:\\\\", "https:/\\", " "];
-const TAILS = ["", "/", "/x", "/EventPass", "?q=1", "#f", "\\x", "\\..\\admin", "@evil.test", "-x/x#tickets.example.com/EventPass", "%2Fx", "%2fx", "/..", "//", "/%2e%2e/", ":443", ":8443", "?next=https://evil.test/x", "#@evil.test", "​/x", "~x", "+x", "=x", "&x"];
+const TAILS = ["", "/", "/\uff36\uff29\uff30", "/EventPass\u200b", "/Event\u00adPass", "?id=\uff11", "?id=\u0661", "/x", "/EventPass", "?q=1", "#f", "\\x", "\\..\\admin", "@evil.test", "-x/x#tickets.example.com/EventPass", "%2Fx", "%2fx", "/..", "//", "/%2e%2e/", ":443", ":8443", "?next=https://evil.test/x", "#@evil.test", "​/x", "~x", "+x", "=x", "&x"];
 const CLOSERS = ["", ")", ">", "]", ".", ",", ").", "’", "**", "_", "”", "!", "?", "‹"];
 const SPACES = [" ", " ", " ", "  ", " ", " ", "　", "\t", "​", "⁠"];
 const FRAMES = ["Buy at %s today.", "Refunds: %s.", "See %s", "Write to %s for details.", "%s", "Go here: %s, then pay.", "[%s]", "<%s>", "Tickets are at %s today and %s tomorrow."];

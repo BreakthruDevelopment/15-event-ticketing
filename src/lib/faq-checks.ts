@@ -180,6 +180,26 @@ export function parseLink(link: string): { scheme: "http" | "https" | ""; key: s
   return { scheme: (m ? m[1].toLowerCase() : "") as "http" | "https" | "", key: (host + tail).replace(/\/$/, "") };
 }
 
+/**
+ * What follows a token's host: its path, query and fragment, exactly as written. A browser keeps every character of these
+ * ("/\uff36\uff29\uff30" is a different page from "/VIP", and so is one with a zero-width space in it), while the front
+ * door folds compatibility characters and drops invisible ones: right for hosts and numbers, wrong for a path. So a link
+ * whose tail the front door would change is refused: the model has no reason to write one, and a flag only degrades to the
+ * quoted source.
+ */
+const tokenTail = (token: string) => {
+  const at = token.indexOf("://");
+  const rest = token.slice(at < 0 ? 0 : at + 3);
+  const cut = rest.search(/[/?#]/);
+  return cut < 0 ? "" : rest.slice(cut);
+};
+function hasUnstableLinkTail(answer: string): boolean {
+  return answer.split(/\s+/).some((token) => {
+    const tail = tokenTail(token);
+    return tail !== "" && normalizeText(tail) !== tail && findLinksAndEmails(normalizeText(token)).links.length > 0;
+  });
+}
+
 function linkMatches(a: ReturnType<typeof parseLink>, s: ReturnType<typeof parseLink>): boolean {
   return a.key === s.key && (!a.scheme || a.scheme === s.scheme);
 }
@@ -336,7 +356,7 @@ export function unsupportedParts(answer: string, sourceText: string, citedIds: s
   const s = findLinksAndEmails(src);
   if (a.emails.some((e) => !s.emails.some((x) => x === e))) flags.push("unsupported_email");
   const srcLinks = s.links.map(parseLink);
-  if (a.links.some((l) => !srcLinks.some((x) => linkMatches(parseLink(l), x)))) flags.push("unsupported_link");
+  if (hasUnstableLinkTail(answer) || a.links.some((l) => !srcLinks.some((x) => linkMatches(parseLink(l), x)))) flags.push("unsupported_link");
 
   const srcPhones = findPhones(src);
   if (findPhones(ans).some((d) => !srcPhones.some((p) => p.endsWith(d) || d.endsWith(p)))) flags.push("unsupported_phone");

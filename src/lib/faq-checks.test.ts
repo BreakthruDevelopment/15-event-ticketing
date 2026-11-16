@@ -381,6 +381,24 @@ describe("the normalisation front door", () => {
     }
   });
 
+  it("a path or query is compared as written: compatibility and invisible characters in it are not folded away", () => {
+    const m: SourceMap = new Map([["F1", { id: "F1", kind: "faq", label: "Q", text: "Q\nBuy at https://tickets.example.com/VIP?id=12 today." }]]);
+    const r = (a: string) => checkFaqAnswer({ status: "answered", answer: a, citations: ["F1"] }, m);
+    expect(r("Buy at https://tickets.example.com/VIP?id=12 today.").mode).toBe("model");
+    for (const bad of [
+      "Buy at https://tickets.example.com/\uff36\uff29\uff30?id=12 today.", // fullwidth VIP (Codex's case)
+      "Buy at https://tickets.example.com/VIP\u200b?id=12 today.", // zero-width space in the path
+      "Buy at https://tickets.example.com/V\u00adIP?id=12 today.", // soft hyphen
+      "Buy at https://tickets.example.com/VIP?id=\uff11\uff12 today.", // fullwidth digits in the query
+      "Buy at https://tickets.example.com/VIP?id=\u0661\u0662 today.",
+      "Buy at tickets.example.com/\uff36\uff29\uff30?id=12 today.",
+    ]) {
+      expect(r(bad), bad).toMatchObject({ mode: "quoted", answer: null, flags: expect.arrayContaining(["unsupported_link"]) });
+    }
+    // the host is still read as a browser reads it: an invisible character in the host is the same host
+    expect(r("Buy at https://tickets.example\u200b.com/VIP?id=12 today.").mode).toBe("model");
+  });
+
   it("ZWNJ and ZWJ are kept (IDNA keeps them: they change the host); other format characters are dropped", () => {
     expect(normalizeText("a‌b‍c")).toBe("a‌b‍c");
     expect(normalizeText("a​b­c﻿d⁠e")).toBe("abcde");
