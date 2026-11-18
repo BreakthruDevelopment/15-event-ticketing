@@ -348,6 +348,52 @@ done
 [ "$(echo "$csp1" | grep -o "nonce-[^']*")" != "$(echo "$csp2" | grep -o "nonce-[^']*")" ] || fail "the CSP nonce must be fresh per request"
 pass "/tickets and /door carry a per-request nonce CSP"
 
+# ---------------------------------------------------------------------------
+# FAQ bot (spec 15.5). The organiser writes one entry with one price in it; an attendee asks about it; whatever comes back
+# is GROUNDED in that entry. The server checks (src/lib/faq-checks.ts) are what make that true, and nothing else here
+# reaches them: demo mode quotes the entry ("lookup"), a live model's own words go through the same checks first. The
+# assertion is the property, not the wording — no figure the organiser never wrote may appear in the answer.
+# ---------------------------------------------------------------------------
+FAQ_ANSWER="Lamar Street garage next to the venue, \$10 for the evening."
+FAQ_OP="$(uuid)"
+FAQ_JSON="{\"question\":\"Where do I park?\",\"answer\":\"$FAQ_ANSWER\",\"clientOpId\":\"$FAQ_OP\"}"
+req "$JAR_O" POST "/api/organizer/events/$EVENT_ID/faq" "$FAQ_JSON"; expect 201 "create an FAQ entry"
+FAQ_REF=$(echo "$BODY" | jq -r '.entry.refNo')
+req "$JAR_O" POST "/api/organizer/events/$EVENT_ID/faq" "$FAQ_JSON"; expect 200 "replayed FAQ entry"
+[ "$(echo "$BODY" | jq -r '.replayed')" = "true" ] || fail "a replayed FAQ entry must say so: $BODY"
+req "$JAR_A" POST "/api/organizer/events/$EVENT_ID/faq" "$FAQ_JSON"; expect 403 "an attendee writing the FAQ"
+req /dev/null GET "/api/events/$EVENT_ID/faq"; expect 200 "the public FAQ"
+echo "$BODY" | jq -e --argjson r "$FAQ_REF" '.view == "public" and (.entries | map(.refNo) | index($r) != null)' >/dev/null || fail "the entry is not on the public FAQ: $BODY"
+
+req /dev/null POST "/api/events/$EVENT_ID/ask" "{\"question\":\"Where do I park?\",\"clientOpId\":\"$(uuid)\"}"; expect 401 "asking signed out"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -H 'content-type: application/json' -d '{"question":"Where do I park?"}' "$BASE_URL/api/events/$EVENT_ID/ask")
+[ "$code" = "403" ] || fail "asking without an Origin should be 403, got $code"
+req "$JAR_A" POST "/api/events/$EVENT_ID/ask" "{\"question\":\"nul\\u0000byte\",\"clientOpId\":\"$(uuid)\"}"; expect 400 "a NUL byte in a question"
+req "$JAR_A" POST "/api/events/$EVENT_ID/ask" "{\"question\":\"\",\"clientOpId\":\"$(uuid)\"}"; expect 400 "an empty question"
+
+ASK_OP="$(uuid)"
+req "$JAR_A" POST "/api/events/$EVENT_ID/ask" "{\"question\":\"Where do I park?\",\"clientOpId\":\"$ASK_OP\"}"; expect 200 "an attendee asks"
+ASK_BODY=$BODY
+ANSWER=$(echo "$ASK_BODY" | jq -r '.text')
+[ -n "$ANSWER" ] && [ "$ANSWER" != "null" ] || fail "the ask returned no text: $ASK_BODY"
+# THE PROPERTY: every price in the answer is a price the organiser wrote. A fabricated figure is what the checks exist for.
+BAD_MONEY=$(printf '%s' "$ANSWER" | grep -oE '\$[0-9][0-9,.]*' | grep -vx '\$10' || true)
+[ -z "$BAD_MONEY" ] || fail "the answer states a price the FAQ entry does not ($BAD_MONEY): $ANSWER"
+if [ "$(echo "$ASK_BODY" | jq -r '.status')" = "answered" ]; then
+  echo "$ASK_BODY" | jq -e '(.citations | length) >= 1 and (.mode == "model" or .mode == "quoted" or .mode == "lookup" or .mode == "cached")' >/dev/null \
+    || fail "an answered ask must cite a source and name its mode: $ASK_BODY"
+  printf '%s' "$ANSWER" | grep -qi 'lamar' || fail "the answer does not come from the organiser's entry: $ANSWER"
+else
+  echo "note - the model declined this question (status $(echo "$ASK_BODY" | jq -r '.status')); the price check still ran"
+fi
+req "$JAR_A" POST "/api/events/$EVENT_ID/ask" "{\"question\":\"Where do I park?\",\"clientOpId\":\"$ASK_OP\"}"; expect 200 "a replayed ask"
+[ "$(echo "$BODY" | jq -r '.replayed')" = "true" ] || fail "a replayed ask must say so: $BODY"
+[ "$(echo "$BODY" | jq -r '.text')" = "$ANSWER" ] || fail "a replayed ask must return the first answer: $BODY"
+req "$JAR_O" GET "/api/organizer/events/$EVENT_ID/questions"; expect 200 "the organiser's question log"
+echo "$BODY" | jq -e '[.days[].questions[]] | length >= 1' >/dev/null || fail "the organiser cannot see what was asked: $BODY"
+req "$JAR_A" GET "/api/organizer/events/$EVENT_ID/questions"; expect 403 "an attendee on the question log"
+pass "the FAQ bot answers from the organiser's entry and states no price the entry does not"
+
 if [ -n "${SMOKE_ADMIN_EMAIL:-}" ] && [ -n "${SMOKE_ADMIN_PASSWORD:-}" ]; then
   post_auth "$JAR_ADM" /api/auth/sign-in/email "{\"email\":\"$SMOKE_ADMIN_EMAIL\",\"password\":\"$SMOKE_ADMIN_PASSWORD\"}" || fail "admin sign-in failed"
   req "$JAR_ADM" GET /api/admin/stats; expect 200 "admin stats"

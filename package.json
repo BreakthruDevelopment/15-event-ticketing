@@ -14,7 +14,10 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/migrate.mts",
     "db:seed": "tsx scripts/seed.mts",
-    "smoke": "bash scripts/smoke.sh"
+    "smoke": "bash scripts/smoke.sh",
+    "eval:faq": "vitest run test/ai-evals.test.ts",
+    "test:fuzz": "FAQ_PROPERTY_SEEDS=1-200 FAQ_PROPERTY_RUNS=20000 vitest run src/lib/faq-checks.property.test.ts",
+    "gen:unicode-numeric": "python3 scripts/gen-unicode-numeric.py"
   },
   "dependencies": {
     "better-auth": "^1.7.15",

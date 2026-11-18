@@ -11,6 +11,14 @@ export const demoFixtures: Record<string, unknown> = {
       "You have a few open items. The most recent ones focus on setup work; nothing looks overdue.",
     highlights: ["Setup tasks are the largest group", "No items are flagged urgent"],
   },
+  // The FAQ bot (src/lib/ai/event-faq.ts). The demo event's F3 entry ("Where do I park?" -> "Lamar Street garage next to
+  // the venue, $10 for the evening.") has the fixed id DEMO_FAQ_PARKING_ID, so this passes the same server checks as a
+  // live answer. It is shown only when `matchFaq` agrees the question is about that entry; see `answerFaq`.
+  "event-faq-answer": {
+    status: "answered",
+    answer: "Recorded demo answer: parking is in the Lamar Street garage next to the venue, $10 for the evening.",
+    citations: ["F3"],
+  },
 };
 
 /**
